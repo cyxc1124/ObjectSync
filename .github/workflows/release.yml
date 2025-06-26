@@ -11,6 +11,10 @@ on:
         required: true
         default: 'v0.0.1'
 
+permissions:
+  contents: write
+  packages: write
+
 env:
   PROJECT_NAME: objectsync
 
@@ -109,15 +113,29 @@ jobs:
       with:
         path: artifacts
 
+    - name: 调试artifact结构
+      run: |
+        echo "=== Artifact 目录结构 ==="
+        find artifacts -type f -ls || echo "没有找到artifacts目录"
+        echo ""
+        echo "=== 当前目录内容 ==="
+        ls -la
+        
     - name: 整理发布文件
       run: |
         mkdir -p release
+        
+        echo "=== 开始处理artifact ==="
         
         # 为每个平台创建压缩包
         for artifact_dir in artifacts/*/; do
           if [ -d "$artifact_dir" ]; then
             artifact_name=$(basename "$artifact_dir")
-            binary_file=$(find "$artifact_dir" -type f -executable -o -name "*.exe" | head -1)
+            echo "处理 artifact: $artifact_name"
+            
+            # 查找二进制文件
+            binary_file=$(find "$artifact_dir" -type f \( -name "*.exe" -o ! -name ".*" \) | head -1)
+            echo "找到二进制文件: $binary_file"
             
             if [ -f "$binary_file" ]; then
               # 创建临时目录
@@ -127,45 +145,62 @@ jobs:
               # 复制二进制文件
               if [[ "$artifact_name" == *"windows"* ]]; then
                 cp "$binary_file" "$temp_dir/${PROJECT_NAME}.exe"
+                echo "复制Windows二进制文件到: $temp_dir/${PROJECT_NAME}.exe"
               else
                 cp "$binary_file" "$temp_dir/${PROJECT_NAME}"
                 chmod +x "$temp_dir/${PROJECT_NAME}"
+                echo "复制Linux/macOS二进制文件到: $temp_dir/${PROJECT_NAME}"
               fi
               
               # 复制文档文件
-              [ -f README.md ] && cp README.md "$temp_dir/"
-              [ -f RELEASE_NOTES.md ] && cp RELEASE_NOTES.md "$temp_dir/"
-              [ -f LICENSE ] && cp LICENSE "$temp_dir/"
+              [ -f README.md ] && cp README.md "$temp_dir/" && echo "复制 README.md"
+              [ -f LICENSE ] && cp LICENSE "$temp_dir/" && echo "复制 LICENSE"
               
               # 复制脚本文件
               if [ -d scripts ]; then
                 mkdir -p "$temp_dir/scripts"
                 if [[ "$artifact_name" == *"windows"* ]]; then
-                  find scripts -name "*.bat" -exec cp {} "$temp_dir/scripts/" \;
+                  find scripts -name "*.bat" -exec cp {} "$temp_dir/scripts/" \; && echo "复制Windows脚本"
                 else
                   find scripts -name "*.sh" -exec cp {} "$temp_dir/scripts/" \;
                   find "$temp_dir/scripts" -name "*.sh" -exec chmod +x {} \;
+                  echo "复制Linux/macOS脚本"
                 fi
               fi
               
               # 创建压缩包
+              release_file=""
               if [[ "$artifact_name" == *"windows"* ]]; then
-                (cd "$temp_dir" && zip -r "../release/${PROJECT_NAME}-${{ steps.version.outputs.tag }}-${artifact_name#${PROJECT_NAME}-}.zip" .)
+                release_file="release/${PROJECT_NAME}-${{ steps.version.outputs.tag }}-${artifact_name#${PROJECT_NAME}-}.zip"
+                (cd "$temp_dir" && zip -r "../$release_file" .)
               else
-                tar -czf "release/${PROJECT_NAME}-${{ steps.version.outputs.tag }}-${artifact_name#${PROJECT_NAME}-}.tar.gz" -C "$temp_dir" .
+                release_file="release/${PROJECT_NAME}-${{ steps.version.outputs.tag }}-${artifact_name#${PROJECT_NAME}-}.tar.gz"
+                tar -czf "$release_file" -C "$temp_dir" .
               fi
+              
+              echo "创建发布包: $release_file"
               
               # 清理临时目录
               rm -rf "$temp_dir"
+            else
+              echo "警告: 在 $artifact_dir 中未找到二进制文件"
             fi
           fi
         done
+        
+        echo "=== 发布文件列表 ==="
+        ls -la release/ || echo "release目录为空"
 
     - name: 生成发布说明
       run: |
-        if [ -f RELEASE_NOTES.md ]; then
-          echo "## 发布文件" >> release_body.md
-          echo "" >> release_body.md
+        echo "ObjectSync ${{ steps.version.outputs.tag }} 发布" > release_body.md
+        echo "" >> release_body.md
+        echo "这是 ObjectSync 对象存储下载工具的 ${{ steps.version.outputs.tag }} 版本。" >> release_body.md
+        echo "" >> release_body.md
+        echo "## 📦 发布文件" >> release_body.md
+        echo "" >> release_body.md
+        
+        if [ -d release ] && [ "$(ls -A release)" ]; then
           for file in release/*; do
             if [ -f "$file" ]; then
               filename=$(basename "$file")
@@ -173,30 +208,39 @@ jobs:
               echo "- \`$filename\` ($filesize)" >> release_body.md
             fi
           done
-          echo "" >> release_body.md
-          cat RELEASE_NOTES.md >> release_body.md
         else
-          echo "ObjectSync ${{ steps.version.outputs.tag }} 发布" > release_body.md
-          echo "" >> release_body.md
-          echo "## 发布文件" >> release_body.md
-          echo "" >> release_body.md
-          for file in release/*; do
-            if [ -f "$file" ]; then
-              filename=$(basename "$file")
-              filesize=$(ls -lh "$file" | awk '{print $5}')
-              echo "- \`$filename\` ($filesize)" >> release_body.md
-            fi
-          done
+          echo "- 发布文件生成中..." >> release_body.md
         fi
+        
+        echo "" >> release_body.md
+        echo "## 🚀 快速开始" >> release_body.md
+        echo "" >> release_body.md
+        echo "1. 下载对应平台的压缩包" >> release_body.md
+        echo "2. 解压到任意目录" >> release_body.md
+        echo "3. 运行 \`objectsync\` 启动交互式菜单" >> release_body.md
+        echo "4. 按照提示进行配置和使用" >> release_body.md
+        
+        echo "" >> release_body.md
+        echo "### 📋 支持的平台" >> release_body.md
+        echo "" >> release_body.md
+        echo "- Windows (AMD64/ARM64)" >> release_body.md
+        echo "- Linux (AMD64/ARM64)" >> release_body.md
+        echo "- macOS (AMD64/ARM64)" >> release_body.md
+        
+        echo "" >> release_body.md
+        echo "感谢使用 ObjectSync！" >> release_body.md
 
     - name: 创建GitHub Release
-      uses: softprops/action-gh-release@v1
+      uses: softprops/action-gh-release@v2
       with:
         tag_name: ${{ steps.version.outputs.tag }}
         name: ObjectSync ${{ steps.version.outputs.tag }}
         body_path: release_body.md
-        files: release/*
+        files: |
+          release/*.zip
+          release/*.tar.gz
         draft: false
         prerelease: false
+        make_latest: true
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} 

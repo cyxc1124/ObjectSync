@@ -1,0 +1,165 @@
+# ObjectSync项目忽略文件
+
+# 编译产物
+/bin/
+*.exe
+*.exe~
+objectsync
+objectsync.exe
+ceph-backup
+ceph-backup.exe
+
+# 配置文件（包含真实凭据）
+config.yaml
+config.yml
+# 保留示例配置
+!config.example.yaml
+
+# 运行时文件
+.backup_state.json
+*.log
+
+# 下载数据目录
+/backup/
+/downloaded-data/
+
+# IDE和编辑器
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# 系统文件
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# 临时文件
+*.tmp
+*.temp
+
+# 测试编译产物
+*.test
+
+# Go coverage文件
+*.out
+coverage.txt
+coverage.html
+
+# 环境变量文件
+.env
+.env.local
+.env.production
+
+# 日志文件
+/logs/
+
+# 开发工具和IDE
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+*.iml
+*.ipr
+*.iws
+*.sublime-project
+*.sublime-workspace
+*~
+\#*\#
+/.emacs.desktop
+/.emacs.desktop.lock
+*.elc
+auto-save-list
+tramp
+.\#*
+
+# 系统文件
+.AppleDouble
+.LSOverride
+Icon?
+._*
+.Spotlight-V100
+.Trashes
+
+# Windows
+ehthumbs.db
+$RECYCLE.BIN/
+*.cab
+*.msi
+*.msm
+*.msp
+
+# Linux
+*~
+.fuse_hidden*
+.directory
+.Trash-*
+
+# 依赖和模块
+# Go模块下载缓存（通常不需要忽略，但如果需要可以取消注释）
+# /vendor/
+go.work
+go.work.sum
+
+# 临时文件和缓存
+/tmp/
+/temp/
+*.tmp
+*.temp
+
+# 缓存目录
+/cache/
+.cache/
+
+# 压缩文件（除了发布包）
+*.zip
+*.tar.gz
+*.tar.bz2
+*.tar.xz
+*.rar
+*.7z
+
+# 但保留releases目录中的发布包
+!/releases/*.zip
+!/releases/*.tar.gz
+
+# 测试和调试
+/test-output/
+/benchmark-results/
+debug
+debug.test
+__debug_bin
+*.prof
+*.cpu
+*.mem
+
+# 文档生成
+/docs-generated/
+*.html
+
+# 但保留手写的文档
+!/docs/*.md
+
+# 发布和部署
+*.tar.gz
+*.zip
+docker-compose.override.yml
+.docker/
+k8s-secrets.yaml
+*-secret.yaml
+
+# 其他工具
+tmp/
+
+# 代码生成工具输出
+*.pb.go
+*_gen.go
+
+# Swagger/OpenAPI生成文件
+swagger.yaml
+api-docs/
+
+# Node.js（如果使用前端工具）
+node_modules/
+npm-debug.log
+yarn-error.log 

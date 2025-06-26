@@ -224,14 +224,34 @@ func (b *Backup) listObjects() ([]*s3.Object, error) {
 
 // filterObjects 过滤需要下载的对象
 func (b *Backup) filterObjects(objects []*s3.Object) []*s3.Object {
-	if !b.options.Incremental {
-		return objects
-	}
-
 	var toDownload []*s3.Object
 
 	for _, obj := range objects {
 		key := *obj.Key
+
+		// 跳过空文件名
+		if key == "" {
+			continue
+		}
+
+		// 如果不是增量备份，下载所有对象（包括目录标记）
+		if !b.options.Incremental {
+			toDownload = append(toDownload, obj)
+			continue
+		}
+
+		// 对于目录标记（以/结尾且大小为0），检查本地目录是否存在
+		if strings.HasSuffix(key, "/") && *obj.Size == 0 {
+			localPath := filepath.Join(b.options.OutputDir, key)
+			if _, err := os.Stat(localPath); os.IsNotExist(err) {
+				// 目录不存在，需要创建
+				toDownload = append(toDownload, obj)
+			} else if b.options.Verbose {
+				fmt.Printf("目录已存在: %s\n", key)
+			}
+			continue
+		}
+
 		etag := strings.Trim(*obj.ETag, "\"")
 
 		// 检查文件是否需要下载
@@ -245,10 +265,19 @@ func (b *Backup) filterObjects(objects []*s3.Object) []*s3.Object {
 
 // needsDownload 检查文件是否需要下载
 func (b *Backup) needsDownload(key, etag string, lastModified time.Time, size int64) bool {
-	// 检查本地文件是否存在
+	// 检查本地路径是否存在
 	localPath := filepath.Join(b.options.OutputDir, key)
-	if _, err := os.Stat(localPath); os.IsNotExist(err) {
-		return true
+
+	// 对于目录标记，检查目录是否存在
+	if strings.HasSuffix(key, "/") && size == 0 {
+		if _, err := os.Stat(localPath); os.IsNotExist(err) {
+			return true // 目录不存在，需要创建
+		}
+	} else {
+		// 对于文件，检查文件是否存在
+		if _, err := os.Stat(localPath); os.IsNotExist(err) {
+			return true // 文件不存在，需要下载
+		}
 	}
 
 	// 检查状态记录
@@ -318,7 +347,26 @@ func (b *Backup) downloadObject(obj *s3.Object) error {
 		fmt.Printf("下载: %s -> %s\n", key, localPath)
 	}
 
-	// 创建本地目录
+	// 如果是目录标记（以/结尾且大小为0），只创建目录
+	if strings.HasSuffix(key, "/") && *obj.Size == 0 {
+		if err := os.MkdirAll(localPath, 0755); err != nil {
+			return fmt.Errorf("创建目录失败: %w", err)
+		}
+
+		// 设置目录修改时间
+		if err := os.Chtimes(localPath, *obj.LastModified, *obj.LastModified); err != nil {
+			// 忽略时间设置错误，不是致命的
+			if b.options.Verbose {
+				fmt.Printf("警告: 设置目录时间失败 %s: %v\n", localPath, err)
+			}
+		}
+
+		// 更新进度
+		b.progress.AddFile(*obj.Size)
+		return nil
+	}
+
+	// 创建父目录
 	if err := os.MkdirAll(filepath.Dir(localPath), 0755); err != nil {
 		return err
 	}
@@ -369,6 +417,12 @@ func (b *Backup) updateState(objects []*s3.Object) {
 
 	for _, obj := range objects {
 		key := *obj.Key
+
+		// 跳过空文件名
+		if key == "" {
+			continue
+		}
+
 		etag := strings.Trim(*obj.ETag, "\"")
 
 		b.state.Files[key] = FileState{

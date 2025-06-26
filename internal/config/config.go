@@ -64,21 +64,6 @@ backup:
   workers: 5                             # Number of concurrent download workers
   verbose: false                         # Verbose output
 
-# Optional Filter Configuration
-filters:
-  # Include file patterns (supports wildcards)
-  include:
-    - "*.jpg"
-    - "*.png"
-    - "*.pdf"
-    - "documents/*"
-  
-  # Exclude file patterns (supports wildcards)
-  exclude:
-    - "*.tmp"
-    - "temp/*"
-    - ".DS_Store"
-
 # Retry Configuration
 retry:
   max_attempts: 3                        # Maximum retry attempts

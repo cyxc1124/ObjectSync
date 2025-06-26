@@ -368,14 +368,6 @@ backup:
   workers: %d
   verbose: %t
 
-# Optional Filter Configuration
-filters:
-  include:
-    - "*"
-  exclude:
-    - "*.tmp"
-    - ".DS_Store"
-
 # Retry Configuration
 retry:
   max_attempts: 3

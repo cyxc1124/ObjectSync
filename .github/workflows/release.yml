@@ -4,126 +4,199 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (e.g., v0.0.1)'
+        required: true
+        default: 'v0.0.1'
 
 env:
-  GO_VERSION: '1.24'
+  PROJECT_NAME: objectsync
 
 jobs:
-  build-and-release:
-    name: Build and Release
+  build:
     runs-on: ubuntu-latest
-    
+    strategy:
+      matrix:
+        include:
+          - goos: windows
+            goarch: amd64
+            suffix: .exe
+          - goos: windows
+            goarch: arm64
+            suffix: .exe
+          - goos: linux
+            goarch: amd64
+            suffix: ""
+          - goos: linux
+            goarch: arm64
+            suffix: ""
+          - goos: darwin
+            goarch: amd64
+            suffix: ""
+          - goos: darwin
+            goarch: arm64
+            suffix: ""
+
     steps:
-    - uses: actions/checkout@v4
+    - name: Checkout代码
+      uses: actions/checkout@v4
+
+    - name: 设置Go环境
+      uses: actions/setup-go@v4
       with:
-        fetch-depth: 0
-    
-    - name: Set up Go
-      uses: actions/setup-go@v5
-      with:
-        go-version: ${{ env.GO_VERSION }}
-    
-    - name: Cache Go modules
-      uses: actions/cache@v4
-      with:
-        path: ~/go/pkg/mod
-        key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
-        restore-keys: |
-          ${{ runner.os }}-go-
-    
-    - name: Download dependencies
-      run: go mod download
-    
-    - name: Run tests
-      run: go test -v ./...
-    
-    - name: Get version
+        go-version: '1.24.1'
+
+    - name: 获取版本信息
       id: version
       run: |
-        VERSION=${GITHUB_REF#refs/tags/}
-        echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
-        echo "Building version: $VERSION"
-    
-    - name: Build all platforms
-      run: |
-        mkdir -p dist
-        
-        BUILD_TIME=$(date -u '+%Y-%m-%d %H:%M:%S UTC')
+        if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+          TAG="${{ github.event.inputs.tag }}"
+        else
+          TAG=${GITHUB_REF#refs/tags/}
+        fi
+        VERSION=${TAG#v}
+        BUILD_TIME=$(date '+%Y-%m-%d %H:%M:%S')
         GIT_COMMIT=$(git rev-parse --short HEAD)
-        VERSION=${{ steps.version.outputs.VERSION }}
         
-        # Build for all platforms
-        platforms=(
-          "linux/amd64"
-          "linux/arm64"
-          "darwin/amd64"
-          "darwin/arm64"
-          "windows/amd64"
-        )
+        echo "tag=$TAG" >> $GITHUB_OUTPUT
+        echo "version=$VERSION" >> $GITHUB_OUTPUT
+        echo "build_time=$BUILD_TIME" >> $GITHUB_OUTPUT
+        echo "git_commit=$GIT_COMMIT" >> $GITHUB_OUTPUT
+
+    - name: 下载依赖
+      run: go mod download
+
+    - name: 构建二进制文件
+      env:
+        GOOS: ${{ matrix.goos }}
+        GOARCH: ${{ matrix.goarch }}
+        CGO_ENABLED: 0
+      run: |
+        LDFLAGS="-s -w -X 'main.Version=${{ steps.version.outputs.version }}' -X 'main.BuildTime=${{ steps.version.outputs.build_time }}' -X 'main.GitCommit=${{ steps.version.outputs.git_commit }}'"
+        BINARY_NAME="${PROJECT_NAME}-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.suffix }}"
         
-        for platform in "${platforms[@]}"; do
-          GOOS=${platform%/*}
-          GOARCH=${platform#*/}
-          
-          echo "Building for $GOOS/$GOARCH..."
-          
-          if [ "$GOOS" = "windows" ]; then
-            BINARY_NAME="objectsync-$GOOS-$GOARCH.exe"
-          else
-            BINARY_NAME="objectsync-$GOOS-$GOARCH"
-          fi
-          
-          env GOOS=$GOOS GOARCH=$GOARCH go build \
-            -ldflags "-s -w -X 'main.Version=$VERSION' -X 'main.BuildTime=$BUILD_TIME' -X 'main.GitCommit=$GIT_COMMIT'" \
-            -o "dist/$BINARY_NAME" ./cmd/main.go
-          
-          # Create archive
-          if [ "$GOOS" = "windows" ]; then
-            cd dist && zip "objectsync-$VERSION-$GOOS-$GOARCH.zip" "$BINARY_NAME" && cd ..
-          else
-            cd dist && tar -czf "objectsync-$VERSION-$GOOS-$GOARCH.tar.gz" "$BINARY_NAME" && cd ..
+        go build -ldflags="$LDFLAGS" -o "$BINARY_NAME" cmd/main.go
+        
+        echo "BINARY_NAME=$BINARY_NAME" >> $GITHUB_ENV
+
+    - name: 上传构建产物
+      uses: actions/upload-artifact@v3
+      with:
+        name: ${{ env.BINARY_NAME }}
+        path: ${{ env.BINARY_NAME }}
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout代码
+      uses: actions/checkout@v4
+
+    - name: 获取版本信息
+      id: version
+      run: |
+        if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+          TAG="${{ github.event.inputs.tag }}"
+        else
+          TAG=${GITHUB_REF#refs/tags/}
+        fi
+        echo "tag=$TAG" >> $GITHUB_OUTPUT
+
+    - name: 下载所有构建产物
+      uses: actions/download-artifact@v3
+      with:
+        path: artifacts
+
+    - name: 整理发布文件
+      run: |
+        mkdir -p release
+        
+        # 为每个平台创建压缩包
+        for artifact_dir in artifacts/*/; do
+          if [ -d "$artifact_dir" ]; then
+            artifact_name=$(basename "$artifact_dir")
+            binary_file=$(find "$artifact_dir" -type f -executable -o -name "*.exe" | head -1)
+            
+            if [ -f "$binary_file" ]; then
+              # 创建临时目录
+              temp_dir="temp_$artifact_name"
+              mkdir -p "$temp_dir"
+              
+              # 复制二进制文件
+              if [[ "$artifact_name" == *"windows"* ]]; then
+                cp "$binary_file" "$temp_dir/${PROJECT_NAME}.exe"
+              else
+                cp "$binary_file" "$temp_dir/${PROJECT_NAME}"
+                chmod +x "$temp_dir/${PROJECT_NAME}"
+              fi
+              
+              # 复制文档文件
+              [ -f README.md ] && cp README.md "$temp_dir/"
+              [ -f RELEASE_NOTES.md ] && cp RELEASE_NOTES.md "$temp_dir/"
+              [ -f LICENSE ] && cp LICENSE "$temp_dir/"
+              
+              # 复制脚本文件
+              if [ -d scripts ]; then
+                mkdir -p "$temp_dir/scripts"
+                if [[ "$artifact_name" == *"windows"* ]]; then
+                  find scripts -name "*.bat" -exec cp {} "$temp_dir/scripts/" \;
+                else
+                  find scripts -name "*.sh" -exec cp {} "$temp_dir/scripts/" \;
+                  find "$temp_dir/scripts" -name "*.sh" -exec chmod +x {} \;
+                fi
+              fi
+              
+              # 创建压缩包
+              if [[ "$artifact_name" == *"windows"* ]]; then
+                (cd "$temp_dir" && zip -r "../release/${PROJECT_NAME}-${{ steps.version.outputs.tag }}-${artifact_name#${PROJECT_NAME}-}.zip" .)
+              else
+                tar -czf "release/${PROJECT_NAME}-${{ steps.version.outputs.tag }}-${artifact_name#${PROJECT_NAME}-}.tar.gz" -C "$temp_dir" .
+              fi
+              
+              # 清理临时目录
+              rm -rf "$temp_dir"
+            fi
           fi
         done
-        
-        # List all files
-        ls -la dist/
-    
-    - name: Generate changelog
-      id: changelog
-      run: |
-        if [ -f CHANGELOG.md ]; then
-          # Extract changelog for this version
-          CHANGELOG=$(awk '/^## \['"${{ steps.version.outputs.VERSION }}"'\]/{flag=1; next} /^## \[/{flag=0} flag' CHANGELOG.md)
-        else
-          # Generate simple changelog from commits
-          CHANGELOG="## Changes in ${{ steps.version.outputs.VERSION }}
 
-        $(git log --pretty=format:"- %s" $(git describe --tags --abbrev=0 HEAD^)..HEAD 2>/dev/null || git log --pretty=format:"- %s" --max-count=10)"
+    - name: 生成发布说明
+      run: |
+        if [ -f RELEASE_NOTES.md ]; then
+          echo "## 发布文件" >> release_body.md
+          echo "" >> release_body.md
+          for file in release/*; do
+            if [ -f "$file" ]; then
+              filename=$(basename "$file")
+              filesize=$(ls -lh "$file" | awk '{print $5}')
+              echo "- \`$filename\` ($filesize)" >> release_body.md
+            fi
+          done
+          echo "" >> release_body.md
+          cat RELEASE_NOTES.md >> release_body.md
+        else
+          echo "ObjectSync ${{ steps.version.outputs.tag }} 发布" > release_body.md
+          echo "" >> release_body.md
+          echo "## 发布文件" >> release_body.md
+          echo "" >> release_body.md
+          for file in release/*; do
+            if [ -f "$file" ]; then
+              filename=$(basename "$file")
+              filesize=$(ls -lh "$file" | awk '{print $5}')
+              echo "- \`$filename\` ($filesize)" >> release_body.md
+            fi
+          done
         fi
-        
-        # Save changelog to file
-        echo "$CHANGELOG" > RELEASE_CHANGELOG.md
-        
-        echo "Generated changelog:"
-        cat RELEASE_CHANGELOG.md
-    
-    - name: Create Release
-      id: create_release
-      uses: softprops/action-gh-release@v2
+
+    - name: 创建GitHub Release
+      uses: softprops/action-gh-release@v1
       with:
-        tag_name: ${{ steps.version.outputs.VERSION }}
-        name: ObjectSync ${{ steps.version.outputs.VERSION }}
-        body_path: RELEASE_CHANGELOG.md
+        tag_name: ${{ steps.version.outputs.tag }}
+        name: ObjectSync ${{ steps.version.outputs.tag }}
+        body_path: release_body.md
+        files: release/*
         draft: false
-        prerelease: ${{ contains(steps.version.outputs.VERSION, '-') }}
-        files: |
-          dist/*.zip
-          dist/*.tar.gz
-    
-    - name: Upload build artifacts
-      uses: actions/upload-artifact@v4
-      with:
-        name: objectsync-${{ steps.version.outputs.VERSION }}
-        path: |
-          dist/*.zip
-          dist/*.tar.gz 
+        prerelease: false
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} 

@@ -3,7 +3,7 @@
 
 # 项目信息
 PROJECT_NAME = objectsync
-VERSION = 2.0.0
+VERSION = 0.0.1
 BUILD_TIME = $(shell date '+%Y-%m-%d %H:%M:%S')
 GIT_COMMIT = $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 

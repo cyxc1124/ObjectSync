@@ -16,7 +16,10 @@ import (
 )
 
 type App struct {
-	rootCmd *cobra.Command
+	rootCmd   *cobra.Command
+	version   string
+	buildTime string
+	gitCommit string
 }
 
 func NewApp() *App {
@@ -26,6 +29,16 @@ func NewApp() *App {
 	app := &App{}
 	app.initCommands()
 	return app
+}
+
+// SetVersion 设置版本信息
+func (a *App) SetVersion(version, buildTime, gitCommit string) {
+	a.version = version
+	a.buildTime = buildTime
+	a.gitCommit = gitCommit
+
+	// 更新rootCmd的版本信息
+	a.rootCmd.Version = version
 }
 
 // initConsole 初始化控制台设置，主要用于Windows下的UTF-8编码支持
@@ -58,6 +71,7 @@ func (a *App) initCommands() {
 	a.rootCmd.AddCommand(a.newBackupCmd())
 	a.rootCmd.AddCommand(a.newConfigCmd())
 	a.rootCmd.AddCommand(a.newStatusCmd())
+	a.rootCmd.AddCommand(a.newVersionCmd())
 	a.rootCmd.AddCommand(a.newMenuCmd()) // 添加交互式菜单命令
 }
 
@@ -123,6 +137,17 @@ func (a *App) newStatusCmd() *cobra.Command {
 
 	cmd.Flags().StringP("config", "c", "config.yaml", "配置文件路径")
 	cmd.Flags().StringP("state-file", "f", ".backup_state.json", "状态文件路径")
+
+	return cmd
+}
+
+func (a *App) newVersionCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "version",
+		Short: "显示版本信息",
+		Long:  "显示程序版本、构建时间和Git提交信息",
+		RunE:  a.runVersion,
+	}
 
 	return cmd
 }
@@ -361,6 +386,16 @@ func (a *App) runValidate(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Printf("连接成功!\n")
+	return nil
+}
+
+func (a *App) runVersion(cmd *cobra.Command, args []string) error {
+	fmt.Printf("ObjectSync 对象存储下载工具\n")
+	fmt.Printf("版本: %s\n", a.version)
+	fmt.Printf("构建时间: %s\n", a.buildTime)
+	fmt.Printf("Git提交: %s\n", a.gitCommit)
+	fmt.Printf("Go版本: %s\n", runtime.Version())
+	fmt.Printf("操作系统: %s/%s\n", runtime.GOOS, runtime.GOARCH)
 	return nil
 }
 

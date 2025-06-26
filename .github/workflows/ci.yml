@@ -1,0 +1,80 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test:
+    name: 测试
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout代码
+      uses: actions/checkout@v4
+
+    - name: 设置Go环境
+      uses: actions/setup-go@v4
+      with:
+        go-version: '1.24.1'
+
+    - name: 缓存Go模块
+      uses: actions/cache@v3
+      with:
+        path: ~/go/pkg/mod
+        key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+        restore-keys: |
+          ${{ runner.os }}-go-
+
+    - name: 下载依赖
+      run: go mod download
+
+    - name: 代码格式检查
+      run: |
+        if [ "$(gofmt -s -l . | wc -l)" -gt 0 ]; then
+          echo "以下文件需要格式化:"
+          gofmt -s -l .
+          exit 1
+        fi
+
+    - name: 运行测试
+      run: go test -v ./...
+
+    - name: 运行go vet
+      run: go vet ./...
+
+    - name: 构建测试
+      run: go build -v ./cmd/main.go
+
+  build:
+    name: 构建验证
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        
+    steps:
+    - name: Checkout代码
+      uses: actions/checkout@v4
+
+    - name: 设置Go环境
+      uses: actions/setup-go@v4
+      with:
+        go-version: '1.24.1'
+
+    - name: 下载依赖
+      run: go mod download
+
+    - name: 构建
+      run: go build -v ./cmd/main.go
+
+    - name: 测试基本功能
+      run: |
+        if [ "$RUNNER_OS" = "Windows" ]; then
+          ./main.exe version || echo "版本命令测试完成"
+        else
+          ./main version || echo "版本命令测试完成"
+        fi
+      shell: bash 

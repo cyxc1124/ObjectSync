@@ -169,3 +169,6 @@ api-docs/
 node_modules/
 npm-debug.log
 yarn-error.log 
+
+# 屏蔽开发用的脚步
+/scripts/

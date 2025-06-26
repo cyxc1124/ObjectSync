@@ -193,9 +193,38 @@ jobs:
 
     - name: 生成发布说明
       run: |
-        echo "ObjectSync ${{ steps.version.outputs.tag }} 发布" > release_body.md
-        echo "" >> release_body.md
-        echo "这是 ObjectSync 对象存储下载工具的 ${{ steps.version.outputs.tag }} 版本。" >> release_body.md
+        VERSION="${{ steps.version.outputs.version }}"
+        echo "生成版本 $VERSION 的发布说明..."
+        
+        # 从CHANGELOG.md提取对应版本的内容
+        if [ -f CHANGELOG.md ]; then
+          echo "找到CHANGELOG.md，提取版本 $VERSION 的更新内容..."
+          
+          # 提取指定版本的changelog内容
+          # 从 ## [版本号] 开始，到下一个 ## [ 或文件结尾结束
+          CHANGELOG_CONTENT=$(awk -v ver="$VERSION" '
+            /^## \['"$VERSION"'\]/ { found=1; next }
+            found && /^## \[/ && !/^## \['"$VERSION"'\]/ { found=0 }
+            found && !/^## \['"$VERSION"'\]/ { print }
+          ' CHANGELOG.md)
+          
+          if [ -n "$CHANGELOG_CONTENT" ]; then
+            echo "成功提取到版本 $VERSION 的更新内容"
+            echo "$CHANGELOG_CONTENT" > release_body.md
+          else
+            echo "警告: 在CHANGELOG.md中未找到版本 $VERSION 的更新内容，使用默认模板"
+            echo "ObjectSync ${{ steps.version.outputs.tag }} 发布" > release_body.md
+            echo "" >> release_body.md
+            echo "这是 ObjectSync 对象存储下载工具的 ${{ steps.version.outputs.tag }} 版本。" >> release_body.md
+          fi
+        else
+          echo "警告: 未找到CHANGELOG.md文件，使用默认模板"
+          echo "ObjectSync ${{ steps.version.outputs.tag }} 发布" > release_body.md
+          echo "" >> release_body.md
+          echo "这是 ObjectSync 对象存储下载工具的 ${{ steps.version.outputs.tag }} 版本。" >> release_body.md
+        fi
+        
+        # 添加发布文件列表
         echo "" >> release_body.md
         echo "## 📦 发布文件" >> release_body.md
         echo "" >> release_body.md
@@ -212,14 +241,7 @@ jobs:
           echo "- 发布文件生成中..." >> release_body.md
         fi
         
-        echo "" >> release_body.md
-        echo "## 🚀 快速开始" >> release_body.md
-        echo "" >> release_body.md
-        echo "1. 下载对应平台的压缩包" >> release_body.md
-        echo "2. 解压到任意目录" >> release_body.md
-        echo "3. 运行 \`objectsync\` 启动交互式菜单" >> release_body.md
-        echo "4. 按照提示进行配置和使用" >> release_body.md
-        
+        # 添加支持平台信息
         echo "" >> release_body.md
         echo "### 📋 支持的平台" >> release_body.md
         echo "" >> release_body.md
@@ -228,7 +250,13 @@ jobs:
         echo "- macOS (AMD64/ARM64)" >> release_body.md
         
         echo "" >> release_body.md
-        echo "感谢使用 ObjectSync！" >> release_body.md
+        echo "---" >> release_body.md
+        echo "" >> release_body.md
+        echo "感谢使用 ObjectSync！如有问题请通过 [GitHub Issues](https://github.com/${{ github.repository }}/issues) 反馈。" >> release_body.md
+        
+        echo "" >> release_body.md
+        echo "=== 生成的发布说明预览 ===" >> release_body.md
+        cat release_body.md
 
     - name: 创建GitHub Release
       uses: softprops/action-gh-release@v2

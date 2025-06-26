@@ -8,6 +8,13 @@ import (
 	"objectsync/internal/app"
 )
 
+// 版本信息变量（构建时注入）
+var (
+	Version   = "dev"
+	BuildTime = "unknown"
+	GitCommit = "unknown"
+)
+
 func init() {
 	// 在Windows上自动设置控制台为UTF-8编码
 	if runtime.GOOS == "windows" {
@@ -19,8 +26,9 @@ func init() {
 
 func main() {
 	app := app.NewApp()
+	app.SetVersion(Version, BuildTime, GitCommit)
 	if err := app.Run(); err != nil {
-		log.Printf("Error: %v", err)
+		log.Printf("错误: %v", err)
 		os.Exit(1)
 	}
 }

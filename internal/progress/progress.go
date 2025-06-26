@@ -34,7 +34,7 @@ func (t *Tracker) SetTotal(files, size int64) {
 	t.totalSize = size
 
 	if t.verbose {
-		fmt.Printf("🎯 开始备份: %d 个文件, 总计 %s\n", files, FormatSize(size))
+		fmt.Printf("开始备份: %d 个文件, 总计 %s\n", files, FormatSize(size))
 		fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 	}
 }
@@ -74,7 +74,7 @@ func (t *Tracker) printProgress() {
 	// 生成进度条
 	progressBar := t.generateProgressBar(sizePercent)
 
-	fmt.Printf("\r🚀 [%s] %.1f%% | %d/%d 文件 | %s/%s | %s/s",
+	fmt.Printf("\r[%s] %.1f%% | %d/%d 文件 | %s/%s | %s/s",
 		progressBar,
 		sizePercent,
 		t.currentFiles,
@@ -114,13 +114,13 @@ func (t *Tracker) PrintFinal() {
 	elapsed := time.Since(t.startTime)
 	averageSpeed := float64(t.currentSize) / elapsed.Seconds()
 
-	fmt.Printf("\n\n✅ 备份完成!\n")
+	fmt.Printf("\n\n备份完成!\n")
 	fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-	fmt.Printf("📊 统计信息:\n")
-	fmt.Printf("  📁 文件数量: %d\n", t.currentFiles)
-	fmt.Printf("  💾 数据大小: %s\n", FormatSize(t.currentSize))
-	fmt.Printf("  ⏱️  用时: %s\n", formatDuration(elapsed))
-	fmt.Printf("  📈 平均速度: %s/s\n", FormatSize(int64(averageSpeed)))
+	fmt.Printf("统计信息:\n")
+	fmt.Printf("  文件数量: %d\n", t.currentFiles)
+	fmt.Printf("  数据大小: %s\n", FormatSize(t.currentSize))
+	fmt.Printf("  用时: %s\n", formatDuration(elapsed))
+	fmt.Printf("  平均速度: %s/s\n", FormatSize(int64(averageSpeed)))
 	fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 }
 

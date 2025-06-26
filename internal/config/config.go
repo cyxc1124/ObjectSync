@@ -12,8 +12,7 @@ import (
 type Config struct {
 	Ceph    CephConfig       `mapstructure:"ceph" yaml:"ceph"`
 	Backup  BackupFileConfig `mapstructure:"backup" yaml:"backup"`
-	Bucket  string           `mapstructure:"bucket" yaml:"bucket,omitempty"`   // 单桶模式（向后兼容）
-	Buckets []BucketConfig   `mapstructure:"buckets" yaml:"buckets,omitempty"` // 多桶模式
+	Buckets []BucketConfig   `mapstructure:"buckets" yaml:"buckets"` // 统一使用桶数组
 }
 
 // CephConfig Ceph连接配置
@@ -21,7 +20,6 @@ type CephConfig struct {
 	Endpoint  string `mapstructure:"endpoint" yaml:"endpoint"`
 	AccessKey string `mapstructure:"access_key" yaml:"access_key"`
 	SecretKey string `mapstructure:"secret_key" yaml:"secret_key"`
-	Bucket    string `mapstructure:"bucket" yaml:"bucket,omitempty"` // 单桶模式（向后兼容）
 }
 
 // BackupFileConfig 备份文件配置
@@ -40,20 +38,6 @@ type BucketConfig struct {
 	StateFile string `mapstructure:"state_file" yaml:"state_file,omitempty"`
 	Workers   int    `mapstructure:"workers" yaml:"workers,omitempty"`
 	Verbose   bool   `mapstructure:"verbose" yaml:"verbose,omitempty"`
-}
-
-// BackupSettings 备份设置 (重命名原来的BackupConfig为BackupSettings)
-type BackupSettings struct {
-	Endpoint    string
-	AccessKey   string
-	SecretKey   string
-	Bucket      string
-	OutputDir   string
-	Incremental bool
-	StateFile   string
-	Workers     int
-	Verbose     bool
-	ConfigFile  string
 }
 
 // MultiBucketSettings 多桶备份设置
@@ -77,7 +61,6 @@ type BucketSettings struct {
 
 // 默认配置文件内容
 const defaultConfigContent = `# ObjectSync - 对象存储下载工具配置文件
-# 支持单桶和多桶两种配置模式
 
 # 对象存储连接配置
 ceph:
@@ -85,22 +68,11 @@ ceph:
   access_key: "your-access-key"          # 访问密钥
   secret_key: "your-secret-key"          # 秘密密钥
 
-# 方式一：单桶模式（向后兼容）
-# 取消注释下面的配置以使用单桶模式
-# bucket: "your-bucket-name"
-
-# 方式二：多桶模式（推荐）
-# 可以在一个配置文件中配置多个桶
+# 桶配置 - 可以配置一个或多个桶
 buckets:
-  - name: "documents"                    # 桶名称
-    output_dir: "./backup/documents"     # 本地输出目录
-    state_file: ".state_documents.json" # 状态文件路径
-  - name: "photos"
-    output_dir: "./backup/photos"
-    state_file: ".state_photos.json"
-  - name: "videos"
-    output_dir: "./backup/videos"
-    state_file: ".state_videos.json"
+  - name: "your-bucket-name"             # 桶名称，请修改为实际的桶名称
+    output_dir: "./backup"               # 本地输出目录
+    state_file: ".backup_state.json"    # 状态文件路径
 
 # 全局备份配置
 backup:
@@ -191,15 +163,9 @@ func (cm *ConfigManager) setDefaults() {
 	viper.SetDefault("ceph.endpoint", "")
 	viper.SetDefault("ceph.access_key", "")
 	viper.SetDefault("ceph.secret_key", "")
-	viper.SetDefault("ceph.bucket", "")
-
-	// 单桶模式兼容
-	viper.SetDefault("bucket", "")
 
 	// 备份配置默认值
-	viper.SetDefault("backup.output_dir", "./backup")
 	viper.SetDefault("backup.incremental", true)
-	viper.SetDefault("backup.state_file", ".backup_state.json")
 	viper.SetDefault("backup.workers", 5)
 	viper.SetDefault("backup.verbose", false)
 }
@@ -217,60 +183,31 @@ func (cm *ConfigManager) ValidateConfig() error {
 		return fmt.Errorf("请在配置文件中设置正确的 ceph.secret_key")
 	}
 
-	// 验证桶配置（单桶或多桶至少要有一种）
-	singleBucket := cm.config.Ceph.Bucket != "" && cm.config.Ceph.Bucket != "your-bucket-name"
-	if !singleBucket {
-		singleBucket = cm.config.Bucket != "" && cm.config.Bucket != "your-bucket-name"
+	// 验证桶配置
+	if len(cm.config.Buckets) == 0 {
+		return fmt.Errorf("请在配置文件中设置要备份的桶：buckets")
 	}
 
-	multiBuckets := len(cm.config.Buckets) > 0
-
-	if !singleBucket && !multiBuckets {
-		return fmt.Errorf("请配置要备份的桶：使用 ceph.bucket（单桶）或 buckets（多桶）")
-	}
-
-	// 验证多桶配置
-	if multiBuckets {
-		for i, bucket := range cm.config.Buckets {
-			if bucket.Name == "" {
-				return fmt.Errorf("buckets[%d] 缺少桶名称", i)
-			}
-			if bucket.OutputDir == "" {
-				return fmt.Errorf("buckets[%d] 缺少输出目录", i)
-			}
+	// 验证每个桶的配置
+	for i, bucket := range cm.config.Buckets {
+		if bucket.Name == "" {
+			return fmt.Errorf("buckets[%d] 缺少桶名称", i)
+		}
+		if bucket.OutputDir == "" {
+			return fmt.Errorf("buckets[%d] 缺少输出目录", i)
 		}
 	}
 
 	return nil
 }
 
-// IsMultiBucketMode 检查是否为多桶模式
-func (cm *ConfigManager) IsMultiBucketMode() bool {
-	return len(cm.config.Buckets) > 0
+// GetBucketCount 获取桶的数量
+func (cm *ConfigManager) GetBucketCount() int {
+	return len(cm.config.Buckets)
 }
 
-// ToBackupSettings 将配置转换为备份设置（单桶模式）
-func (cm *ConfigManager) ToBackupSettings() *BackupSettings {
-	bucket := cm.config.Ceph.Bucket
-	if bucket == "" {
-		bucket = cm.config.Bucket
-	}
-
-	return &BackupSettings{
-		Endpoint:    cm.config.Ceph.Endpoint,
-		AccessKey:   cm.config.Ceph.AccessKey,
-		SecretKey:   cm.config.Ceph.SecretKey,
-		Bucket:      bucket,
-		OutputDir:   viper.GetString("backup.output_dir"),
-		Incremental: viper.GetBool("backup.incremental"),
-		StateFile:   viper.GetString("backup.state_file"),
-		Workers:     viper.GetInt("backup.workers"),
-		Verbose:     viper.GetBool("backup.verbose"),
-	}
-}
-
-// ToMultiBucketSettings 将配置转换为多桶备份设置
-func (cm *ConfigManager) ToMultiBucketSettings() *MultiBucketSettings {
+// ToBucketSettings 将配置转换为桶备份设置（统一处理）
+func (cm *ConfigManager) ToBucketSettings() *MultiBucketSettings {
 	settings := &MultiBucketSettings{
 		Endpoint:    cm.config.Ceph.Endpoint,
 		AccessKey:   cm.config.Ceph.AccessKey,
@@ -296,43 +233,11 @@ func (cm *ConfigManager) ToMultiBucketSettings() *MultiBucketSettings {
 		if bucketSettings.Workers == 0 {
 			bucketSettings.Workers = viper.GetInt("backup.workers")
 		}
-		if !bucketSettings.Verbose {
-			bucketSettings.Verbose = viper.GetBool("backup.verbose")
-		}
+		// 注意：verbose是bool类型，false是有效值，不应该被全局配置覆盖
+		// 如果用户在桶配置中明确设置了verbose: false，应该保留这个设置
 
 		settings.Buckets = append(settings.Buckets, bucketSettings)
 	}
 
 	return settings
-}
-
-// OverrideWithFlags 用命令行参数覆盖配置
-func (settings *BackupSettings) OverrideWithFlags(
-	endpoint, accessKey, secretKey, bucket, outputDir, stateFile string,
-	incremental, verbose bool, workers int,
-) {
-	if endpoint != "" {
-		settings.Endpoint = endpoint
-	}
-	if accessKey != "" {
-		settings.AccessKey = accessKey
-	}
-	if secretKey != "" {
-		settings.SecretKey = secretKey
-	}
-	if bucket != "" {
-		settings.Bucket = bucket
-	}
-	if outputDir != "./backup" {
-		settings.OutputDir = outputDir
-	}
-	if stateFile != ".backup_state.json" {
-		settings.StateFile = stateFile
-	}
-	if workers != 5 {
-		settings.Workers = workers
-	}
-	// incremental 和 verbose 的默认值处理需要特殊逻辑
-	settings.Incremental = incremental
-	settings.Verbose = verbose
 }

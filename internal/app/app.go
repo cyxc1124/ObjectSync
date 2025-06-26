@@ -176,33 +176,120 @@ func (a *App) runBackup(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("配置验证失败: %w", err)
 	}
 
-	// 检查是多桶模式还是单桶模式
-	if configManager.IsMultiBucketMode() {
-		return a.runMultiBucketBackup(configManager, endpoint, accessKey, secretKey, incremental, verbose)
-	} else {
-		return a.runSingleBucketBackup(configManager, endpoint, accessKey, secretKey, bucket, outputDir, stateFile, incremental, verbose, workers)
-	}
+	// 统一处理所有桶的备份
+	return a.runBucketsBackup(configManager, endpoint, accessKey, secretKey, bucket, outputDir, stateFile, incremental, verbose, workers)
 }
 
-// runSingleBucketBackup 执行单桶备份
-func (a *App) runSingleBucketBackup(configManager *config.ConfigManager, endpoint, accessKey, secretKey, bucket, outputDir, stateFile string, incremental, verbose bool, workers int) error {
-	// 从配置文件获取基础设置
-	settings := configManager.ToBackupSettings()
+// runBucketsBackup 统一执行桶备份（支持单桶和多桶）
+func (a *App) runBucketsBackup(configManager *config.ConfigManager, endpoint, accessKey, secretKey, bucket, outputDir, stateFile string, incremental, verbose bool, workers int) error {
+	// 获取桶配置
+	settings := configManager.ToBucketSettings()
 
-	// 用命令行参数覆盖配置文件设置
-	settings.OverrideWithFlags(endpoint, accessKey, secretKey, bucket, outputDir, stateFile, incremental, verbose, workers)
+	// 用命令行参数覆盖连接配置
+	if endpoint != "" {
+		settings.Endpoint = endpoint
+	}
+	if accessKey != "" {
+		settings.AccessKey = accessKey
+	}
+	if secretKey != "" {
+		settings.SecretKey = secretKey
+	}
+	settings.Incremental = incremental
 
-	// 转换为备份选项
+	// 如果命令行指定了单个桶参数，只备份指定的桶
+	if bucket != "" {
+		return a.runSpecificBucket(settings, bucket, outputDir, stateFile, verbose, workers)
+	}
+
+	// 备份配置中的所有桶
+	bucketCount := len(settings.Buckets)
+	fmt.Printf("开始备份（共 %d 个桶）\n", bucketCount)
+	fmt.Printf("连接信息: %s\n", settings.Endpoint)
+
+	if verbose {
+		fmt.Printf("桶列表:\n")
+		for i, bucket := range settings.Buckets {
+			fmt.Printf("  %d. %s -> %s\n", i+1, bucket.Name, bucket.OutputDir)
+		}
+		fmt.Println()
+	}
+
+	// 逐个备份每个桶
+	successCount := 0
+	failureCount := 0
+
+	for i, bucketSettings := range settings.Buckets {
+		fmt.Printf("\n[%d/%d] 备份桶: %s\n", i+1, bucketCount, bucketSettings.Name)
+
+		// 为每个桶创建备份选项
+		options := &backup.Options{
+			Endpoint:    settings.Endpoint,
+			AccessKey:   settings.AccessKey,
+			SecretKey:   settings.SecretKey,
+			Bucket:      bucketSettings.Name,
+			OutputDir:   bucketSettings.OutputDir,
+			Incremental: settings.Incremental,
+			StateFile:   bucketSettings.StateFile,
+			Workers:     bucketSettings.Workers,
+			Verbose:     bucketSettings.Verbose || verbose,
+		}
+
+		if options.Verbose {
+			fmt.Printf("  端点: %s\n", options.Endpoint)
+			fmt.Printf("  桶名: %s\n", options.Bucket)
+			fmt.Printf("  输出目录: %s\n", options.OutputDir)
+			fmt.Printf("  增量备份: %v\n", options.Incremental)
+			fmt.Printf("  并发数: %d\n", options.Workers)
+			fmt.Printf("\n")
+		}
+
+		// 创建备份器并执行备份
+		b := backup.New(options)
+		if err := b.Run(); err != nil {
+			fmt.Printf("桶 %s 备份失败: %v\n", bucketSettings.Name, err)
+			failureCount++
+			continue
+		}
+
+		fmt.Printf("桶 %s 备份完成!\n", bucketSettings.Name)
+		successCount++
+	}
+
+	// 显示备份总结
+	fmt.Printf("\n备份完成!\n")
+	fmt.Printf("成功: %d 个桶\n", successCount)
+	if failureCount > 0 {
+		fmt.Printf("失败: %d 个桶\n", failureCount)
+		return fmt.Errorf("部分桶备份失败")
+	}
+
+	return nil
+}
+
+// runSpecificBucket 执行单个指定桶的备份
+func (a *App) runSpecificBucket(settings *config.MultiBucketSettings, bucket, outputDir, stateFile string, verbose bool, workers int) error {
+	// 使用命令行参数或默认值
+	if outputDir == "./backup" {
+		outputDir = "./backup"
+	}
+	if stateFile == ".backup_state.json" {
+		stateFile = ".backup_state.json"
+	}
+	if workers == 5 {
+		workers = 5
+	}
+
 	options := &backup.Options{
 		Endpoint:    settings.Endpoint,
 		AccessKey:   settings.AccessKey,
 		SecretKey:   settings.SecretKey,
-		Bucket:      settings.Bucket,
-		OutputDir:   settings.OutputDir,
+		Bucket:      bucket,
+		OutputDir:   outputDir,
 		Incremental: settings.Incremental,
-		StateFile:   settings.StateFile,
-		Workers:     settings.Workers,
-		Verbose:     settings.Verbose,
+		StateFile:   stateFile,
+		Workers:     workers,
+		Verbose:     verbose,
 	}
 
 	fmt.Printf("开始备份桶: %s\n", options.Bucket)
@@ -223,77 +310,6 @@ func (a *App) runSingleBucketBackup(configManager *config.ConfigManager, endpoin
 	}
 
 	fmt.Println("备份完成!")
-	return nil
-}
-
-// runMultiBucketBackup 执行多桶备份
-func (a *App) runMultiBucketBackup(configManager *config.ConfigManager, endpoint, accessKey, secretKey string, incremental, verbose bool) error {
-	// 获取多桶配置
-	settings := configManager.ToMultiBucketSettings()
-
-	// 用命令行参数覆盖连接配置
-	if endpoint != "" {
-		settings.Endpoint = endpoint
-	}
-	if accessKey != "" {
-		settings.AccessKey = accessKey
-	}
-	if secretKey != "" {
-		settings.SecretKey = secretKey
-	}
-	settings.Incremental = incremental
-
-	fmt.Printf("开始多桶备份（共 %d 个桶）\n", len(settings.Buckets))
-	fmt.Printf("连接信息: %s\n", settings.Endpoint)
-
-	if verbose {
-		fmt.Printf("桶列表:\n")
-		for i, bucket := range settings.Buckets {
-			fmt.Printf("  %d. %s -> %s\n", i+1, bucket.Name, bucket.OutputDir)
-		}
-		fmt.Println()
-	}
-
-	// 逐个备份每个桶
-	successCount := 0
-	failureCount := 0
-
-	for i, bucketSettings := range settings.Buckets {
-		fmt.Printf("\n[%d/%d] 备份桶: %s\n", i+1, len(settings.Buckets), bucketSettings.Name)
-
-		// 为每个桶创建备份选项
-		options := &backup.Options{
-			Endpoint:    settings.Endpoint,
-			AccessKey:   settings.AccessKey,
-			SecretKey:   settings.SecretKey,
-			Bucket:      bucketSettings.Name,
-			OutputDir:   bucketSettings.OutputDir,
-			Incremental: settings.Incremental,
-			StateFile:   bucketSettings.StateFile,
-			Workers:     bucketSettings.Workers,
-			Verbose:     bucketSettings.Verbose || verbose,
-		}
-
-		// 创建备份器并执行备份
-		b := backup.New(options)
-		if err := b.Run(); err != nil {
-			fmt.Printf("桶 %s 备份失败: %v\n", bucketSettings.Name, err)
-			failureCount++
-			continue
-		}
-
-		fmt.Printf("桶 %s 备份完成!\n", bucketSettings.Name)
-		successCount++
-	}
-
-	// 显示总结
-	fmt.Printf("\n多桶备份完成!\n")
-	fmt.Printf("成功: %d 个桶\n", successCount)
-	if failureCount > 0 {
-		fmt.Printf("失败: %d 个桶\n", failureCount)
-		return fmt.Errorf("部分桶备份失败")
-	}
-
 	return nil
 }
 
@@ -322,12 +338,20 @@ func (a *App) runValidate(cmd *cobra.Command, args []string) error {
 
 	// 测试连接
 	fmt.Println("测试Ceph连接...")
-	settings := configManager.ToBackupSettings()
+	settings := configManager.ToBucketSettings()
+
+	// 测试第一个桶的连接
+	if len(settings.Buckets) == 0 {
+		fmt.Printf("没有配置要测试的桶\n")
+		return fmt.Errorf("配置中没有桶信息")
+	}
+
+	firstBucket := settings.Buckets[0]
 	options := &backup.Options{
 		Endpoint:  settings.Endpoint,
 		AccessKey: settings.AccessKey,
 		SecretKey: settings.SecretKey,
-		Bucket:    settings.Bucket,
+		Bucket:    firstBucket.Name,
 	}
 
 	b := backup.New(options)
@@ -406,8 +430,6 @@ func (a *App) runStatusMenu() error {
 
 	fmt.Printf("查看备份状态\n")
 	fmt.Printf("配置文件: %s\n", configFile)
-	fmt.Printf("状态文件: %s\n", stateFile)
-	fmt.Println()
 
 	// 先检查配置文件是否存在
 	if _, err := os.Stat(configFile); os.IsNotExist(err) {
@@ -418,40 +440,46 @@ func (a *App) runStatusMenu() error {
 	// 尝试加载配置以获取正确的状态文件路径
 	configManager := config.NewConfigManager(configFile)
 	if _, err := configManager.LoadConfig(); err == nil {
-		// 成功加载配置，检查是否为多桶模式
-		if configManager.IsMultiBucketMode() {
-			fmt.Println("检测到多桶配置，显示所有桶的状态:")
-			settings := configManager.ToMultiBucketSettings()
+		// 成功加载配置，显示所有桶的状态
+		settings := configManager.ToBucketSettings()
+		bucketCount := len(settings.Buckets)
 
-			for i, bucket := range settings.Buckets {
-				fmt.Printf("\n[%d] 桶: %s\n", i+1, bucket.Name)
-				fmt.Printf("    状态文件: %s\n", bucket.StateFile)
-
-				if err := a.showBucketStatus(bucket.StateFile); err != nil {
-					fmt.Printf("    读取状态失败: %v\n", err)
-				}
-			}
+		if bucketCount == 0 {
+			fmt.Printf("配置中没有配置桶信息\n")
 			return nil
-		} else {
-			// 单桶模式，使用配置中的状态文件
-			settings := configManager.ToBackupSettings()
-			stateFile = settings.StateFile
-			fmt.Printf("更新状态文件路径: %s\n", stateFile)
 		}
+
+		fmt.Printf("\n显示所有桶的状态（共 %d 个桶）:\n", bucketCount)
+		for i, bucket := range settings.Buckets {
+			fmt.Printf("\n[%d] 桶: %s\n", i+1, bucket.Name)
+			fmt.Printf("    状态文件: %s\n", bucket.StateFile)
+
+			if err := a.showBucketStatus(bucket.StateFile, true); err != nil { // true表示使用缩进
+				fmt.Printf("    读取状态失败: %v\n", err)
+			}
+		}
+		return nil
 	} else {
 		fmt.Printf("配置文件加载失败: %v\n", err)
 		fmt.Printf("使用默认状态文件: %s\n", stateFile)
-	}
+		fmt.Println()
 
-	// 显示单桶状态
-	return a.showBucketStatus(stateFile)
+		// 显示默认状态文件的状态
+		return a.showBucketStatus(stateFile, false) // false表示不使用缩进
+	}
 }
 
 // showBucketStatus 显示单个桶的备份状态
-func (a *App) showBucketStatus(stateFile string) error {
+func (a *App) showBucketStatus(stateFile string, withIndent bool) error {
+	// 根据缩进需要设置前缀
+	indent := ""
+	if withIndent {
+		indent = "    "
+	}
+
 	// 检查状态文件是否存在
 	if _, err := os.Stat(stateFile); os.IsNotExist(err) {
-		fmt.Printf("    状态文件不存在，可能是首次备份\n")
+		fmt.Printf("%s状态文件不存在，可能是首次备份\n", indent)
 		return nil
 	}
 
@@ -468,24 +496,25 @@ func (a *App) showBucketStatus(stateFile string) error {
 	}
 
 	// 显示状态信息
-	fmt.Printf("    最后备份时间: %s\n", state.LastBackup.Format("2006-01-02 15:04:05"))
-	fmt.Printf("    已备份文件数: %d\n", len(state.Files))
+	fmt.Printf("%s最后备份时间: %s\n", indent, state.LastBackup.Format("2006-01-02 15:04:05"))
+	fmt.Printf("%s已备份文件数: %d\n", indent, len(state.Files))
 
 	// 计算总大小
 	var totalSize int64
 	for _, file := range state.Files {
 		totalSize += file.Size
 	}
-	fmt.Printf("    总数据大小: %s\n", progress.FormatSize(totalSize))
+	fmt.Printf("%s总数据大小: %s\n", indent, progress.FormatSize(totalSize))
 
 	// 显示最近的几个文件
-	fmt.Println("    最近备份的文件:")
+	fmt.Printf("%s最近备份的文件:\n", indent)
 	count := 0
 	for filename, fileState := range state.Files {
 		if count >= 3 { // 在菜单模式下显示少一些文件
 			break
 		}
-		fmt.Printf("      %s (%s, %s)\n",
+		fmt.Printf("%s  %s (%s, %s)\n",
+			indent,
 			filename,
 			progress.FormatSize(fileState.Size),
 			fileState.LastModified.Format("2006-01-02 15:04:05"))
@@ -493,7 +522,7 @@ func (a *App) showBucketStatus(stateFile string) error {
 	}
 
 	if len(state.Files) > 3 {
-		fmt.Printf("      ... 还有 %d 个文件\n", len(state.Files)-3)
+		fmt.Printf("%s  ... 还有 %d 个文件\n", indent, len(state.Files)-3)
 	}
 
 	return nil
@@ -554,23 +583,9 @@ func (a *App) runInit(cmd *cobra.Command, args []string) error {
 	fmt.Scanln(&verbResponse)
 	verbose = verbResponse == "y" || verbResponse == "Y"
 
-	// 选择配置模式
-	fmt.Println("\n选择配置模式:")
-	fmt.Println("1. 单桶模式 - 只备份一个桶")
-	fmt.Println("2. 多桶模式 - 备份多个桶 (推荐)")
-	fmt.Print("请选择 (1/2, 默认: 2): ")
-	var modeChoice string
-	fmt.Scanln(&modeChoice)
-
-	var configContent string
-
-	if modeChoice == "1" {
-		// 单桶模式
-		configContent = a.generateSingleBucketConfig(endpoint, accessKey, secretKey, workers, incremental, verbose)
-	} else {
-		// 多桶模式（默认）
-		configContent = a.generateMultiBucketConfig(endpoint, accessKey, secretKey, workers, incremental, verbose)
-	}
+	// 生成默认配置（包含示例桶配置）
+	fmt.Println("\n生成配置文件...")
+	configContent := a.generateDefaultConfig(endpoint, accessKey, secretKey, workers, incremental, verbose)
 
 	// 写入配置文件
 	file, err := os.Create(output)
@@ -646,23 +661,9 @@ func (a *App) runInitMenu() error {
 	fmt.Scanln(&verbResponse)
 	verbose = verbResponse == "y" || verbResponse == "Y"
 
-	// 选择配置模式
-	fmt.Println("\n选择配置模式:")
-	fmt.Println("1. 单桶模式 - 只备份一个桶")
-	fmt.Println("2. 多桶模式 - 备份多个桶 (推荐)")
-	fmt.Print("请选择 (1/2, 默认: 2): ")
-	var modeChoice string
-	fmt.Scanln(&modeChoice)
-
-	var configContent string
-
-	if modeChoice == "1" {
-		// 单桶模式
-		configContent = a.generateSingleBucketConfig(endpoint, accessKey, secretKey, workers, incremental, verbose)
-	} else {
-		// 多桶模式（默认）
-		configContent = a.generateMultiBucketConfig(endpoint, accessKey, secretKey, workers, incremental, verbose)
-	}
+	// 生成默认配置（包含示例桶配置）
+	fmt.Println("\n生成配置文件...")
+	configContent := a.generateDefaultConfig(endpoint, accessKey, secretKey, workers, incremental, verbose)
 
 	// 写入配置文件
 	file, err := os.Create(output)
@@ -682,36 +683,9 @@ func (a *App) runInitMenu() error {
 	return nil
 }
 
-// generateSingleBucketConfig 生成单桶配置
-func (a *App) generateSingleBucketConfig(endpoint, accessKey, secretKey string, workers int, incremental, verbose bool) string {
-	return fmt.Sprintf(`# ObjectSync - 对象存储下载工具配置文件（单桶模式）
-# 由交互式初始化生成
-
-# 对象存储连接配置
-ceph:
-  endpoint: "%s"
-  access_key: "%s"
-  secret_key: "%s"
-  bucket: "your-bucket-name"              # 请修改为实际的桶名称
-
-# 备份配置
-backup:
-  output_dir: "./backup"                  # 请修改为实际的输出目录
-  incremental: %t
-  state_file: ".backup_state.json"
-  workers: %d
-  verbose: %t
-
-# 重试配置
-retry:
-  max_attempts: 3
-  delay: "5s"
-`, endpoint, accessKey, secretKey, incremental, workers, verbose)
-}
-
-// generateMultiBucketConfig 生成多桶配置
-func (a *App) generateMultiBucketConfig(endpoint, accessKey, secretKey string, workers int, incremental, verbose bool) string {
-	return fmt.Sprintf(`# ObjectSync - 对象存储下载工具配置文件（多桶模式）
+// generateDefaultConfig 生成默认配置（统一处理）
+func (a *App) generateDefaultConfig(endpoint, accessKey, secretKey string, workers int, incremental, verbose bool) string {
+	return fmt.Sprintf(`# ObjectSync - 对象存储下载工具配置文件
 # 由交互式初始化生成
 
 # 对象存储连接配置
@@ -720,19 +694,22 @@ ceph:
   access_key: "%s"
   secret_key: "%s"
 
-# 多桶配置 - 请根据实际情况修改桶名称和输出目录
+# 桶配置 - 请根据实际情况修改
+# 单桶：保留一个桶配置，删除其他
+# 多桶：添加更多桶配置
 buckets:
-  - name: "documents"                     # 修改为实际的桶名称
-    output_dir: "./backup/documents"      # 修改为实际的输出目录
-    state_file: ".state_documents.json"
-  - name: "photos"
-    output_dir: "./backup/photos"
-    state_file: ".state_photos.json"
-  - name: "videos"
-    output_dir: "./backup/videos"
-    state_file: ".state_videos.json"
-    workers: 8                            # 可选：为特定桶设置不同的并发数
-    verbose: true                         # 可选：为特定桶启用详细输出
+  - name: "your-bucket-name"              # 请修改为实际的桶名称
+    output_dir: "./backup"                # 请修改为实际的输出目录
+    state_file: ".backup_state.json"
+  # 示例：多桶配置（如不需要请删除）
+  # - name: "documents"
+  #   output_dir: "./backup/documents"
+  #   state_file: ".state_documents.json"
+  # - name: "photos"
+  #   output_dir: "./backup/photos"
+  #   state_file: ".state_photos.json"
+  #   workers: 8                          # 可选：为特定桶设置不同的并发数
+  #   verbose: true                       # 可选：为特定桶启用详细输出
 
 # 全局备份配置
 backup:

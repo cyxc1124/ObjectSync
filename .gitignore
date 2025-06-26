@@ -123,6 +123,12 @@ go.work.sum
 !/releases/*.zip
 !/releases/*.tar.gz
 
+# GitHub Actions构建产物
+/dist/
+
+# 发布相关临时文件
+RELEASE_CHANGELOG.md
+
 # 测试和调试
 /test-output/
 /benchmark-results/

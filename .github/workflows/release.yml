@@ -1,0 +1,142 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+env:
+  GO_VERSION: '1.24'
+
+jobs:
+  build-and-release:
+    name: Build and Release
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+    
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: ${{ env.GO_VERSION }}
+    
+    - name: Cache Go modules
+      uses: actions/cache@v3
+      with:
+        path: ~/go/pkg/mod
+        key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+        restore-keys: |
+          ${{ runner.os }}-go-
+    
+    - name: Download dependencies
+      run: go mod download
+    
+    - name: Run tests
+      run: go test -v ./...
+    
+    - name: Get version
+      id: version
+      run: |
+        VERSION=${GITHUB_REF#refs/tags/}
+        echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+        echo "Building version: $VERSION"
+    
+    - name: Build all platforms
+      run: |
+        mkdir -p dist
+        
+        BUILD_TIME=$(date -u '+%Y-%m-%d %H:%M:%S UTC')
+        GIT_COMMIT=$(git rev-parse --short HEAD)
+        VERSION=${{ steps.version.outputs.VERSION }}
+        
+        # Build for all platforms
+        platforms=(
+          "linux/amd64"
+          "linux/arm64"
+          "darwin/amd64"
+          "darwin/arm64"
+          "windows/amd64"
+        )
+        
+        for platform in "${platforms[@]}"; do
+          GOOS=${platform%/*}
+          GOARCH=${platform#*/}
+          
+          echo "Building for $GOOS/$GOARCH..."
+          
+          if [ "$GOOS" = "windows" ]; then
+            BINARY_NAME="objectsync-$GOOS-$GOARCH.exe"
+          else
+            BINARY_NAME="objectsync-$GOOS-$GOARCH"
+          fi
+          
+          env GOOS=$GOOS GOARCH=$GOARCH go build \
+            -ldflags "-s -w -X 'main.Version=$VERSION' -X 'main.BuildTime=$BUILD_TIME' -X 'main.GitCommit=$GIT_COMMIT'" \
+            -o "dist/$BINARY_NAME" ./cmd/main.go
+          
+          # Create archive
+          if [ "$GOOS" = "windows" ]; then
+            cd dist && zip "objectsync-$VERSION-$GOOS-$GOARCH.zip" "$BINARY_NAME" && cd ..
+          else
+            cd dist && tar -czf "objectsync-$VERSION-$GOOS-$GOARCH.tar.gz" "$BINARY_NAME" && cd ..
+          fi
+        done
+        
+        # List all files
+        ls -la dist/
+    
+    - name: Generate changelog
+      id: changelog
+      run: |
+        if [ -f CHANGELOG.md ]; then
+          # Extract changelog for this version
+          CHANGELOG=$(awk '/^## \['"${{ steps.version.outputs.VERSION }}"'\]/{flag=1; next} /^## \[/{flag=0} flag' CHANGELOG.md)
+        else
+          # Generate simple changelog from commits
+          CHANGELOG="## Changes in ${{ steps.version.outputs.VERSION }}
+
+        $(git log --pretty=format:"- %s" $(git describe --tags --abbrev=0 HEAD^)..HEAD 2>/dev/null || git log --pretty=format:"- %s" --max-count=10)"
+        fi
+        
+        # Save changelog to file
+        echo "$CHANGELOG" > RELEASE_CHANGELOG.md
+        
+        echo "Generated changelog:"
+        cat RELEASE_CHANGELOG.md
+    
+    - name: Create Release
+      id: create_release
+      uses: actions/create-release@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tag_name: ${{ steps.version.outputs.VERSION }}
+        release_name: ObjectSync ${{ steps.version.outputs.VERSION }}
+        body_path: RELEASE_CHANGELOG.md
+        draft: false
+        prerelease: ${{ contains(steps.version.outputs.VERSION, '-') }}
+    
+    - name: Upload Release Assets
+      run: |
+        # Upload all archives
+        for file in dist/*.zip dist/*.tar.gz; do
+          [ -f "$file" ] || continue
+          echo "Uploading $file..."
+          
+          curl \
+            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Content-Type: application/octet-stream" \
+            --data-binary @"$file" \
+            "${{ steps.create_release.outputs.upload_url }}=$(basename "$file")"
+        done
+    
+    - name: Upload build artifacts
+      uses: actions/upload-artifact@v3
+      with:
+        name: objectsync-${{ steps.version.outputs.VERSION }}
+        path: |
+          dist/*.zip
+          dist/*.tar.gz 

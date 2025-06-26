@@ -8,10 +8,12 @@ import (
 	"github.com/spf13/viper"
 )
 
-// Config 应用配置结构
+// Config 主配置结构
 type Config struct {
-	Ceph   CephConfig       `mapstructure:"ceph" yaml:"ceph"`
-	Backup BackupFileConfig `mapstructure:"backup" yaml:"backup"`
+	Ceph    CephConfig       `mapstructure:"ceph" yaml:"ceph"`
+	Backup  BackupFileConfig `mapstructure:"backup" yaml:"backup"`
+	Bucket  string           `mapstructure:"bucket" yaml:"bucket,omitempty"`   // 单桶模式（向后兼容）
+	Buckets []BucketConfig   `mapstructure:"buckets" yaml:"buckets,omitempty"` // 多桶模式
 }
 
 // CephConfig Ceph连接配置
@@ -19,7 +21,7 @@ type CephConfig struct {
 	Endpoint  string `mapstructure:"endpoint" yaml:"endpoint"`
 	AccessKey string `mapstructure:"access_key" yaml:"access_key"`
 	SecretKey string `mapstructure:"secret_key" yaml:"secret_key"`
-	Bucket    string `mapstructure:"bucket" yaml:"bucket"`
+	Bucket    string `mapstructure:"bucket" yaml:"bucket,omitempty"` // 单桶模式（向后兼容）
 }
 
 // BackupFileConfig 备份文件配置
@@ -29,6 +31,15 @@ type BackupFileConfig struct {
 	StateFile   string `mapstructure:"state_file" yaml:"state_file"`
 	Workers     int    `mapstructure:"workers" yaml:"workers"`
 	Verbose     bool   `mapstructure:"verbose" yaml:"verbose"`
+}
+
+// BucketConfig 单个桶的配置
+type BucketConfig struct {
+	Name      string `mapstructure:"name" yaml:"name"`
+	OutputDir string `mapstructure:"output_dir" yaml:"output_dir"`
+	StateFile string `mapstructure:"state_file" yaml:"state_file,omitempty"`
+	Workers   int    `mapstructure:"workers" yaml:"workers,omitempty"`
+	Verbose   bool   `mapstructure:"verbose" yaml:"verbose,omitempty"`
 }
 
 // BackupSettings 备份设置 (重命名原来的BackupConfig为BackupSettings)
@@ -45,29 +56,62 @@ type BackupSettings struct {
 	ConfigFile  string
 }
 
+// MultiBucketSettings 多桶备份设置
+type MultiBucketSettings struct {
+	Endpoint    string
+	AccessKey   string
+	SecretKey   string
+	Buckets     []BucketSettings
+	Incremental bool
+	ConfigFile  string
+}
+
+// BucketSettings 单个桶的备份设置
+type BucketSettings struct {
+	Name      string
+	OutputDir string
+	StateFile string
+	Workers   int
+	Verbose   bool
+}
+
 // 默认配置文件内容
-const defaultConfigContent = `# Ceph Object Storage Incremental Backup Tool Configuration
-# Please modify the following configuration according to your environment
+const defaultConfigContent = `# ObjectSync - 对象存储下载工具配置文件
+# 支持单桶和多桶两种配置模式
 
-# Ceph Object Storage Configuration
+# 对象存储连接配置
 ceph:
-  endpoint: "http://192.168.1.100:7480"  # Ceph RGW endpoint URL
-  access_key: "your-access-key"          # Access key
-  secret_key: "your-secret-key"          # Secret key
-  bucket: "your-bucket-name"             # Bucket name to backup
+  endpoint: "http://192.168.1.100:7480"  # 对象存储端点URL
+  access_key: "your-access-key"          # 访问密钥
+  secret_key: "your-secret-key"          # 秘密密钥
 
-# Backup Configuration
+# 方式一：单桶模式（向后兼容）
+# 取消注释下面的配置以使用单桶模式
+# bucket: "your-bucket-name"
+
+# 方式二：多桶模式（推荐）
+# 可以在一个配置文件中配置多个桶
+buckets:
+  - name: "documents"                    # 桶名称
+    output_dir: "./backup/documents"     # 本地输出目录
+    state_file: ".state_documents.json" # 状态文件路径
+  - name: "photos"
+    output_dir: "./backup/photos"
+    state_file: ".state_photos.json"
+  - name: "videos"
+    output_dir: "./backup/videos"
+    state_file: ".state_videos.json"
+
+# 全局备份配置
 backup:
-  output_dir: "./backup"                 # Local output directory
-  incremental: true                      # Enable incremental backup
-  state_file: ".backup_state.json"       # State file path
-  workers: 5                             # Number of concurrent download workers
-  verbose: false                         # Verbose output
+  incremental: true                      # 启用增量备份
+  workers: 5                             # 默认并发下载数
+  verbose: false                         # 详细输出
 
-# Retry Configuration
+# 重试配置
 retry:
-  max_attempts: 3                        # Maximum retry attempts
-  delay: "5s"                           # Retry delay
+  max_attempts: 3                        # 最大重试次数
+  delay: "5s"                           # 重试延迟
 `
 
 // ConfigManager 配置管理器
@@ -95,7 +139,7 @@ func (cm *ConfigManager) LoadConfig() (*Config, error) {
 		if err := cm.createDefaultConfig(); err != nil {
 			return nil, fmt.Errorf("创建默认配置文件失败: %w", err)
 		}
-		fmt.Printf("✅ 默认配置文件已创建: %s\n", cm.configPath)
+		fmt.Printf("默认配置文件已创建: %s\n", cm.configPath)
 		fmt.Printf("请编辑配置文件并填入正确的Ceph连接信息，然后重新运行程序。\n")
 		return nil, fmt.Errorf("请先配置 %s 文件", cm.configPath)
 	}
@@ -149,6 +193,9 @@ func (cm *ConfigManager) setDefaults() {
 	viper.SetDefault("ceph.secret_key", "")
 	viper.SetDefault("ceph.bucket", "")
 
+	// 单桶模式兼容
+	viper.SetDefault("bucket", "")
+
 	// 备份配置默认值
 	viper.SetDefault("backup.output_dir", "./backup")
 	viper.SetDefault("backup.incremental", true)
@@ -159,6 +206,7 @@ func (cm *ConfigManager) setDefaults() {
 
 // ValidateConfig 验证配置
 func (cm *ConfigManager) ValidateConfig() error {
+	// 验证基础连接配置
 	if cm.config.Ceph.Endpoint == "" || cm.config.Ceph.Endpoint == "http://192.168.1.100:7480" {
 		return fmt.Errorf("请在配置文件中设置正确的 ceph.endpoint")
 	}
@@ -168,25 +216,94 @@ func (cm *ConfigManager) ValidateConfig() error {
 	if cm.config.Ceph.SecretKey == "" || cm.config.Ceph.SecretKey == "your-secret-key" {
 		return fmt.Errorf("请在配置文件中设置正确的 ceph.secret_key")
 	}
-	if cm.config.Ceph.Bucket == "" || cm.config.Ceph.Bucket == "your-bucket-name" {
-		return fmt.Errorf("请在配置文件中设置正确的 ceph.bucket")
+
+	// 验证桶配置（单桶或多桶至少要有一种）
+	singleBucket := cm.config.Ceph.Bucket != "" && cm.config.Ceph.Bucket != "your-bucket-name"
+	if !singleBucket {
+		singleBucket = cm.config.Bucket != "" && cm.config.Bucket != "your-bucket-name"
 	}
+
+	multiBuckets := len(cm.config.Buckets) > 0
+
+	if !singleBucket && !multiBuckets {
+		return fmt.Errorf("请配置要备份的桶：使用 ceph.bucket（单桶）或 buckets（多桶）")
+	}
+
+	// 验证多桶配置
+	if multiBuckets {
+		for i, bucket := range cm.config.Buckets {
+			if bucket.Name == "" {
+				return fmt.Errorf("buckets[%d] 缺少桶名称", i)
+			}
+			if bucket.OutputDir == "" {
+				return fmt.Errorf("buckets[%d] 缺少输出目录", i)
+			}
+		}
+	}
+
 	return nil
 }
 
-// ToBackupSettings 将配置转换为备份设置
+// IsMultiBucketMode 检查是否为多桶模式
+func (cm *ConfigManager) IsMultiBucketMode() bool {
+	return len(cm.config.Buckets) > 0
+}
+
+// ToBackupSettings 将配置转换为备份设置（单桶模式）
 func (cm *ConfigManager) ToBackupSettings() *BackupSettings {
+	bucket := cm.config.Ceph.Bucket
+	if bucket == "" {
+		bucket = cm.config.Bucket
+	}
+
 	return &BackupSettings{
 		Endpoint:    cm.config.Ceph.Endpoint,
 		AccessKey:   cm.config.Ceph.AccessKey,
 		SecretKey:   cm.config.Ceph.SecretKey,
-		Bucket:      cm.config.Ceph.Bucket,
+		Bucket:      bucket,
 		OutputDir:   viper.GetString("backup.output_dir"),
 		Incremental: viper.GetBool("backup.incremental"),
 		StateFile:   viper.GetString("backup.state_file"),
 		Workers:     viper.GetInt("backup.workers"),
 		Verbose:     viper.GetBool("backup.verbose"),
 	}
+}
+
+// ToMultiBucketSettings 将配置转换为多桶备份设置
+func (cm *ConfigManager) ToMultiBucketSettings() *MultiBucketSettings {
+	settings := &MultiBucketSettings{
+		Endpoint:    cm.config.Ceph.Endpoint,
+		AccessKey:   cm.config.Ceph.AccessKey,
+		SecretKey:   cm.config.Ceph.SecretKey,
+		Incremental: viper.GetBool("backup.incremental"),
+		ConfigFile:  cm.configPath,
+	}
+
+	// 转换桶配置
+	for _, bucketConfig := range cm.config.Buckets {
+		bucketSettings := BucketSettings{
+			Name:      bucketConfig.Name,
+			OutputDir: bucketConfig.OutputDir,
+			StateFile: bucketConfig.StateFile,
+			Workers:   bucketConfig.Workers,
+			Verbose:   bucketConfig.Verbose,
+		}
+
+		// 使用全局默认值填充未设置的字段
+		if bucketSettings.StateFile == "" {
+			bucketSettings.StateFile = fmt.Sprintf(".backup_state_%s.json", bucketConfig.Name)
+		}
+		if bucketSettings.Workers == 0 {
+			bucketSettings.Workers = viper.GetInt("backup.workers")
+		}
+		if !bucketSettings.Verbose {
+			bucketSettings.Verbose = viper.GetBool("backup.verbose")
+		}
+
+		settings.Buckets = append(settings.Buckets, bucketSettings)
+	}
+
+	return settings
 }
 
 // OverrideWithFlags 用命令行参数覆盖配置

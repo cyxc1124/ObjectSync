@@ -399,6 +399,106 @@ func (a *App) runStatus(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+// runStatusMenu 专为菜单系统设计的状态查看
+func (a *App) runStatusMenu() error {
+	configFile := "config.yaml"       // 默认配置文件
+	stateFile := ".backup_state.json" // 默认状态文件
+
+	fmt.Printf("查看备份状态\n")
+	fmt.Printf("配置文件: %s\n", configFile)
+	fmt.Printf("状态文件: %s\n", stateFile)
+	fmt.Println()
+
+	// 先检查配置文件是否存在
+	if _, err := os.Stat(configFile); os.IsNotExist(err) {
+		fmt.Printf("配置文件不存在，请先进行配置初始化\n")
+		return nil
+	}
+
+	// 尝试加载配置以获取正确的状态文件路径
+	configManager := config.NewConfigManager(configFile)
+	if _, err := configManager.LoadConfig(); err == nil {
+		// 成功加载配置，检查是否为多桶模式
+		if configManager.IsMultiBucketMode() {
+			fmt.Println("检测到多桶配置，显示所有桶的状态:")
+			settings := configManager.ToMultiBucketSettings()
+
+			for i, bucket := range settings.Buckets {
+				fmt.Printf("\n[%d] 桶: %s\n", i+1, bucket.Name)
+				fmt.Printf("    状态文件: %s\n", bucket.StateFile)
+
+				if err := a.showBucketStatus(bucket.StateFile); err != nil {
+					fmt.Printf("    读取状态失败: %v\n", err)
+				}
+			}
+			return nil
+		} else {
+			// 单桶模式，使用配置中的状态文件
+			settings := configManager.ToBackupSettings()
+			stateFile = settings.StateFile
+			fmt.Printf("更新状态文件路径: %s\n", stateFile)
+		}
+	} else {
+		fmt.Printf("配置文件加载失败: %v\n", err)
+		fmt.Printf("使用默认状态文件: %s\n", stateFile)
+	}
+
+	// 显示单桶状态
+	return a.showBucketStatus(stateFile)
+}
+
+// showBucketStatus 显示单个桶的备份状态
+func (a *App) showBucketStatus(stateFile string) error {
+	// 检查状态文件是否存在
+	if _, err := os.Stat(stateFile); os.IsNotExist(err) {
+		fmt.Printf("    状态文件不存在，可能是首次备份\n")
+		return nil
+	}
+
+	// 读取状态文件
+	file, err := os.Open(stateFile)
+	if err != nil {
+		return fmt.Errorf("无法读取状态文件: %w", err)
+	}
+	defer file.Close()
+
+	var state backup.State
+	if err := json.NewDecoder(file).Decode(&state); err != nil {
+		return fmt.Errorf("状态文件格式错误: %w", err)
+	}
+
+	// 显示状态信息
+	fmt.Printf("    最后备份时间: %s\n", state.LastBackup.Format("2006-01-02 15:04:05"))
+	fmt.Printf("    已备份文件数: %d\n", len(state.Files))
+
+	// 计算总大小
+	var totalSize int64
+	for _, file := range state.Files {
+		totalSize += file.Size
+	}
+	fmt.Printf("    总数据大小: %s\n", progress.FormatSize(totalSize))
+
+	// 显示最近的几个文件
+	fmt.Println("    最近备份的文件:")
+	count := 0
+	for filename, fileState := range state.Files {
+		if count >= 3 { // 在菜单模式下显示少一些文件
+			break
+		}
+		fmt.Printf("      %s (%s, %s)\n",
+			filename,
+			progress.FormatSize(fileState.Size),
+			fileState.LastModified.Format("2006-01-02 15:04:05"))
+		count++
+	}
+
+	if len(state.Files) > 3 {
+		fmt.Printf("      ... 还有 %d 个文件\n", len(state.Files)-3)
+	}
+
+	return nil
+}
+
 func (a *App) runInit(cmd *cobra.Command, args []string) error {
 	output, _ := cmd.Flags().GetString("output")
 
@@ -698,7 +798,7 @@ func (a *App) runMenu(cmd *cobra.Command, args []string) error {
 		case "3":
 			// 查看状态
 			fmt.Println("[信息] 查看备份状态...")
-			if err := a.runStatus(cmd, args); err != nil {
+			if err := a.runStatusMenu(); err != nil {
 				fmt.Printf("查看状态失败: %v\n", err)
 			}
 			a.pauseAndContinue()

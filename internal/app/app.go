@@ -4,7 +4,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"runtime"
+	"time"
 
 	"objectsync/internal/backup"
 	"objectsync/internal/config"
@@ -35,6 +37,12 @@ func initConsole() {
 }
 
 func (a *App) Run() error {
+	// 检查是否有参数，如果没有参数直接启动菜单
+	if len(os.Args) == 1 {
+		// 没有参数，直接启动交互式菜单
+		return a.runMenu(a.rootCmd, []string{})
+	}
+	// 有参数，正常执行cobra命令
 	return a.rootCmd.Execute()
 }
 
@@ -43,12 +51,14 @@ func (a *App) initCommands() {
 		Use:   "objectsync",
 		Short: "对象存储下载工具",
 		Long:  "一个用于从S3兼容对象存储下载数据到本地的增量下载工具",
+		RunE:  a.runDefault, // 智能默认行为
 	}
 
 	// 添加子命令
 	a.rootCmd.AddCommand(a.newBackupCmd())
 	a.rootCmd.AddCommand(a.newConfigCmd())
 	a.rootCmd.AddCommand(a.newStatusCmd())
+	a.rootCmd.AddCommand(a.newMenuCmd()) // 添加交互式菜单命令
 }
 
 func (a *App) newBackupCmd() *cobra.Command {
@@ -117,6 +127,23 @@ func (a *App) newStatusCmd() *cobra.Command {
 	return cmd
 }
 
+func (a *App) newMenuCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "menu",
+		Short: "交互式菜单（默认行为）",
+		Long:  "提供交互式菜单界面，这也是直接运行 objectsync 的默认行为",
+		RunE:  a.runMenu,
+	}
+
+	return cmd
+}
+
+// runDefault 智能默认行为：没有子命令时启动交互式菜单
+func (a *App) runDefault(cmd *cobra.Command, args []string) error {
+	// 没有参数和标志时启动交互式菜单
+	return a.runMenu(cmd, args)
+}
+
 func (a *App) runBackup(cmd *cobra.Command, args []string) error {
 	// 获取命令行参数
 	configFile, _ := cmd.Flags().GetString("config")
@@ -149,6 +176,16 @@ func (a *App) runBackup(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("配置验证失败: %w", err)
 	}
 
+	// 检查是多桶模式还是单桶模式
+	if configManager.IsMultiBucketMode() {
+		return a.runMultiBucketBackup(configManager, endpoint, accessKey, secretKey, incremental, verbose)
+	} else {
+		return a.runSingleBucketBackup(configManager, endpoint, accessKey, secretKey, bucket, outputDir, stateFile, incremental, verbose, workers)
+	}
+}
+
+// runSingleBucketBackup 执行单桶备份
+func (a *App) runSingleBucketBackup(configManager *config.ConfigManager, endpoint, accessKey, secretKey, bucket, outputDir, stateFile string, incremental, verbose bool, workers int) error {
 	// 从配置文件获取基础设置
 	settings := configManager.ToBackupSettings()
 
@@ -168,9 +205,9 @@ func (a *App) runBackup(cmd *cobra.Command, args []string) error {
 		Verbose:     settings.Verbose,
 	}
 
-	fmt.Printf("🚀 开始备份 Ceph 桶: %s\n", options.Bucket)
+	fmt.Printf("开始备份桶: %s\n", options.Bucket)
 	if options.Verbose {
-		fmt.Printf("📋 配置信息:\n")
+		fmt.Printf("配置信息:\n")
 		fmt.Printf("  端点: %s\n", options.Endpoint)
 		fmt.Printf("  桶名: %s\n", options.Bucket)
 		fmt.Printf("  输出目录: %s\n", options.OutputDir)
@@ -182,17 +219,88 @@ func (a *App) runBackup(cmd *cobra.Command, args []string) error {
 	// 创建备份器并执行备份
 	b := backup.New(options)
 	if err := b.Run(); err != nil {
-		return fmt.Errorf("❌ 备份失败: %w", err)
+		return fmt.Errorf("备份失败: %w", err)
 	}
 
-	fmt.Println("✅ 备份完成!")
+	fmt.Println("备份完成!")
+	return nil
+}
+
+// runMultiBucketBackup 执行多桶备份
+func (a *App) runMultiBucketBackup(configManager *config.ConfigManager, endpoint, accessKey, secretKey string, incremental, verbose bool) error {
+	// 获取多桶配置
+	settings := configManager.ToMultiBucketSettings()
+
+	// 用命令行参数覆盖连接配置
+	if endpoint != "" {
+		settings.Endpoint = endpoint
+	}
+	if accessKey != "" {
+		settings.AccessKey = accessKey
+	}
+	if secretKey != "" {
+		settings.SecretKey = secretKey
+	}
+	settings.Incremental = incremental
+
+	fmt.Printf("开始多桶备份（共 %d 个桶）\n", len(settings.Buckets))
+	fmt.Printf("连接信息: %s\n", settings.Endpoint)
+
+	if verbose {
+		fmt.Printf("桶列表:\n")
+		for i, bucket := range settings.Buckets {
+			fmt.Printf("  %d. %s -> %s\n", i+1, bucket.Name, bucket.OutputDir)
+		}
+		fmt.Println()
+	}
+
+	// 逐个备份每个桶
+	successCount := 0
+	failureCount := 0
+
+	for i, bucketSettings := range settings.Buckets {
+		fmt.Printf("\n[%d/%d] 备份桶: %s\n", i+1, len(settings.Buckets), bucketSettings.Name)
+
+		// 为每个桶创建备份选项
+		options := &backup.Options{
+			Endpoint:    settings.Endpoint,
+			AccessKey:   settings.AccessKey,
+			SecretKey:   settings.SecretKey,
+			Bucket:      bucketSettings.Name,
+			OutputDir:   bucketSettings.OutputDir,
+			Incremental: settings.Incremental,
+			StateFile:   bucketSettings.StateFile,
+			Workers:     bucketSettings.Workers,
+			Verbose:     bucketSettings.Verbose || verbose,
+		}
+
+		// 创建备份器并执行备份
+		b := backup.New(options)
+		if err := b.Run(); err != nil {
+			fmt.Printf("桶 %s 备份失败: %v\n", bucketSettings.Name, err)
+			failureCount++
+			continue
+		}
+
+		fmt.Printf("桶 %s 备份完成!\n", bucketSettings.Name)
+		successCount++
+	}
+
+	// 显示总结
+	fmt.Printf("\n多桶备份完成!\n")
+	fmt.Printf("成功: %d 个桶\n", successCount)
+	if failureCount > 0 {
+		fmt.Printf("失败: %d 个桶\n", failureCount)
+		return fmt.Errorf("部分桶备份失败")
+	}
+
 	return nil
 }
 
 func (a *App) runValidate(cmd *cobra.Command, args []string) error {
 	configFile, _ := cmd.Flags().GetString("config")
 
-	fmt.Printf("🔍 验证配置文件: %s\n", configFile)
+	fmt.Printf("验证配置文件: %s\n", configFile)
 
 	// 创建配置管理器
 	configManager := config.NewConfigManager(configFile)
@@ -200,20 +308,20 @@ func (a *App) runValidate(cmd *cobra.Command, args []string) error {
 	// 加载配置文件
 	_, err := configManager.LoadConfig()
 	if err != nil {
-		fmt.Printf("❌ 配置加载失败: %v\n", err)
+		fmt.Printf("配置加载失败: %v\n", err)
 		return err
 	}
 
 	// 验证配置
 	if err := configManager.ValidateConfig(); err != nil {
-		fmt.Printf("❌ 配置验证失败: %v\n", err)
+		fmt.Printf("配置验证失败: %v\n", err)
 		return err
 	}
 
-	fmt.Println("✅ 配置文件验证通过!")
+	fmt.Println("配置文件验证通过!")
 
 	// 测试连接
-	fmt.Println("🔗 测试Ceph连接...")
+	fmt.Println("测试Ceph连接...")
 	settings := configManager.ToBackupSettings()
 	options := &backup.Options{
 		Endpoint:  settings.Endpoint,
@@ -224,11 +332,11 @@ func (a *App) runValidate(cmd *cobra.Command, args []string) error {
 
 	b := backup.New(options)
 	if err := b.TestConnection(); err != nil {
-		fmt.Printf("❌ 连接失败: %v\n", err)
+		fmt.Printf("连接失败: %v\n", err)
 		return err
 	}
 
-	fmt.Printf("✅ 连接成功!\n")
+	fmt.Printf("连接成功!\n")
 	return nil
 }
 
@@ -236,42 +344,42 @@ func (a *App) runStatus(cmd *cobra.Command, args []string) error {
 	configFile, _ := cmd.Flags().GetString("config")
 	stateFile, _ := cmd.Flags().GetString("state-file")
 
-	fmt.Printf("📊 查看备份状态\n")
+	fmt.Printf("查看备份状态\n")
 	fmt.Printf("配置文件: %s\n", configFile)
 	fmt.Printf("状态文件: %s\n", stateFile)
 	fmt.Println()
 
 	// 检查状态文件是否存在
 	if _, err := os.Stat(stateFile); os.IsNotExist(err) {
-		fmt.Printf("⚠️  状态文件不存在，可能是首次备份\n")
+		fmt.Printf("状态文件不存在，可能是首次备份\n")
 		return nil
 	}
 
 	// 读取状态文件
 	file, err := os.Open(stateFile)
 	if err != nil {
-		return fmt.Errorf("❌ 无法读取状态文件: %w", err)
+		return fmt.Errorf("无法读取状态文件: %w", err)
 	}
 	defer file.Close()
 
 	var state backup.State
 	if err := json.NewDecoder(file).Decode(&state); err != nil {
-		return fmt.Errorf("❌ 状态文件格式错误: %w", err)
+		return fmt.Errorf("状态文件格式错误: %w", err)
 	}
 
 	// 显示状态信息
-	fmt.Printf("📅 最后备份时间: %s\n", state.LastBackup.Format("2006-01-02 15:04:05"))
-	fmt.Printf("📁 已备份文件数: %d\n", len(state.Files))
+	fmt.Printf("最后备份时间: %s\n", state.LastBackup.Format("2006-01-02 15:04:05"))
+	fmt.Printf("已备份文件数: %d\n", len(state.Files))
 
 	// 计算总大小
 	var totalSize int64
 	for _, file := range state.Files {
 		totalSize += file.Size
 	}
-	fmt.Printf("💾 总数据大小: %s\n", progress.FormatSize(totalSize))
+	fmt.Printf("总数据大小: %s\n", progress.FormatSize(totalSize))
 
 	// 显示最近的几个文件
-	fmt.Println("\n📋 最近备份的文件:")
+	fmt.Println("\n最近备份的文件:")
 	count := 0
 	for filename, fileState := range state.Files {
 		if count >= 5 {
@@ -294,13 +402,13 @@ func (a *App) runStatus(cmd *cobra.Command, args []string) error {
 func (a *App) runInit(cmd *cobra.Command, args []string) error {
 	output, _ := cmd.Flags().GetString("output")
 
-	fmt.Println("🚀 交互式配置初始化")
+	fmt.Println("交互式配置初始化")
 	fmt.Printf("将创建配置文件: %s\n", output)
 	fmt.Println()
 
 	// 检查文件是否已存在
 	if _, err := os.Stat(output); err == nil {
-		fmt.Printf("⚠️  配置文件 %s 已存在\n", output)
+		fmt.Printf("配置文件 %s 已存在\n", output)
 		fmt.Print("是否覆盖? (y/N): ")
 		var response string
 		fmt.Scanln(&response)
@@ -310,12 +418,12 @@ func (a *App) runInit(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// 收集配置信息
-	var endpoint, accessKey, secretKey, bucket, outputDir string
+	// 收集基础连接信息
+	var endpoint, accessKey, secretKey string
 	var workers int
 	var incremental, verbose bool
 
-	fmt.Print("请输入Ceph端点URL: ")
+	fmt.Print("请输入对象存储端点URL: ")
 	fmt.Scanln(&endpoint)
 
 	fmt.Print("请输入访问密钥: ")
@@ -324,19 +432,16 @@ func (a *App) runInit(cmd *cobra.Command, args []string) error {
 	fmt.Print("请输入秘密密钥: ")
 	fmt.Scanln(&secretKey)
 
-	fmt.Print("请输入桶名称: ")
-	fmt.Scanln(&bucket)
-
-	fmt.Print("请输入输出目录 (默认: ./backup): ")
-	fmt.Scanln(&outputDir)
-	if outputDir == "" {
-		outputDir = "./backup"
-	}
-
-	fmt.Print("请输入并发数 (默认: 5): ")
-	fmt.Scanf("%d", &workers)
-	if workers <= 0 {
+	fmt.Print("请输入默认并发数 (默认: 5): ")
+	var workersInput string
+	fmt.Scanln(&workersInput)
+	if workersInput == "" {
 		workers = 5
+	} else {
+		fmt.Sscanf(workersInput, "%d", &workers)
+		if workers <= 0 {
+			workers = 5
+		}
 	}
 
 	fmt.Print("启用增量备份? (Y/n): ")
@@ -349,44 +454,306 @@ func (a *App) runInit(cmd *cobra.Command, args []string) error {
 	fmt.Scanln(&verbResponse)
 	verbose = verbResponse == "y" || verbResponse == "Y"
 
-	// 生成配置内容
-	configContent := fmt.Sprintf(`# Ceph Object Storage Incremental Backup Tool Configuration
-# Generated by interactive initialization
+	// 选择配置模式
+	fmt.Println("\n选择配置模式:")
+	fmt.Println("1. 单桶模式 - 只备份一个桶")
+	fmt.Println("2. 多桶模式 - 备份多个桶 (推荐)")
+	fmt.Print("请选择 (1/2, 默认: 2): ")
+	var modeChoice string
+	fmt.Scanln(&modeChoice)
 
-# Ceph Object Storage Configuration
-ceph:
-  endpoint: "%s"
-  access_key: "%s"
-  secret_key: "%s"
-  bucket: "%s"
+	var configContent string
 
-# Backup Configuration
-backup:
-  output_dir: "%s"
-  incremental: %t
-  state_file: ".backup_state.json"
-  workers: %d
-  verbose: %t
-
-# Retry Configuration
-retry:
-  max_attempts: 3
-  delay: "5s"
-`, endpoint, accessKey, secretKey, bucket, outputDir, incremental, workers, verbose)
+	if modeChoice == "1" {
+		// 单桶模式
+		configContent = a.generateSingleBucketConfig(endpoint, accessKey, secretKey, workers, incremental, verbose)
+	} else {
+		// 多桶模式（默认）
+		configContent = a.generateMultiBucketConfig(endpoint, accessKey, secretKey, workers, incremental, verbose)
+	}
 
 	// 写入配置文件
 	file, err := os.Create(output)
 	if err != nil {
-		return fmt.Errorf("❌ 创建配置文件失败: %w", err)
+		return fmt.Errorf("创建配置文件失败: %w", err)
 	}
 	defer file.Close()
 
 	_, err = file.WriteString(configContent)
 	if err != nil {
-		return fmt.Errorf("❌ 写入配置文件失败: %w", err)
+		return fmt.Errorf("写入配置文件失败: %w", err)
 	}
 
-	fmt.Printf("✅ 配置文件已创建: %s\n", output)
-	fmt.Println("现在可以运行: objectsync backup --verbose")
+	fmt.Printf("配置文件已创建: %s\n", output)
+	fmt.Println("请编辑配置文件，填入正确的桶名称和输出目录")
+	fmt.Println("然后运行: objectsync backup --verbose")
 	return nil
+}
+
+// runInitMenu 专为菜单系统设计的配置初始化
+func (a *App) runInitMenu() error {
+	output := "config.yaml" // 固定使用默认配置文件名
+
+	fmt.Println("交互式配置初始化")
+	fmt.Printf("将创建配置文件: %s\n", output)
+	fmt.Println()
+
+	// 检查文件是否已存在
+	if _, err := os.Stat(output); err == nil {
+		fmt.Printf("配置文件 %s 已存在\n", output)
+		fmt.Print("是否覆盖? (y/N): ")
+		var response string
+		fmt.Scanln(&response)
+		if response != "y" && response != "Y" {
+			fmt.Println("操作已取消")
+			return nil
+		}
+	}
+
+	// 收集基础连接信息
+	var endpoint, accessKey, secretKey string
+	var workers int
+	var incremental, verbose bool
+
+	fmt.Print("请输入对象存储端点URL: ")
+	fmt.Scanln(&endpoint)
+
+	fmt.Print("请输入访问密钥: ")
+	fmt.Scanln(&accessKey)
+
+	fmt.Print("请输入秘密密钥: ")
+	fmt.Scanln(&secretKey)
+
+	fmt.Print("请输入默认并发数 (默认: 5): ")
+	var workersInput string
+	fmt.Scanln(&workersInput)
+	if workersInput == "" {
+		workers = 5
+	} else {
+		fmt.Sscanf(workersInput, "%d", &workers)
+		if workers <= 0 {
+			workers = 5
+		}
+	}
+
+	fmt.Print("启用增量备份? (Y/n): ")
+	var incResponse string
+	fmt.Scanln(&incResponse)
+	incremental = incResponse != "n" && incResponse != "N"
+
+	fmt.Print("启用详细输出? (y/N): ")
+	var verbResponse string
+	fmt.Scanln(&verbResponse)
+	verbose = verbResponse == "y" || verbResponse == "Y"
+
+	// 选择配置模式
+	fmt.Println("\n选择配置模式:")
+	fmt.Println("1. 单桶模式 - 只备份一个桶")
+	fmt.Println("2. 多桶模式 - 备份多个桶 (推荐)")
+	fmt.Print("请选择 (1/2, 默认: 2): ")
+	var modeChoice string
+	fmt.Scanln(&modeChoice)
+
+	var configContent string
+
+	if modeChoice == "1" {
+		// 单桶模式
+		configContent = a.generateSingleBucketConfig(endpoint, accessKey, secretKey, workers, incremental, verbose)
+	} else {
+		// 多桶模式（默认）
+		configContent = a.generateMultiBucketConfig(endpoint, accessKey, secretKey, workers, incremental, verbose)
+	}
+
+	// 写入配置文件
+	file, err := os.Create(output)
+	if err != nil {
+		return fmt.Errorf("创建配置文件失败: %w", err)
+	}
+	defer file.Close()
+
+	_, err = file.WriteString(configContent)
+	if err != nil {
+		return fmt.Errorf("写入配置文件失败: %w", err)
+	}
+
+	fmt.Printf("配置文件已创建: %s\n", output)
+	fmt.Println("请编辑配置文件，填入正确的桶名称和输出目录")
+	fmt.Println("然后运行: objectsync backup --verbose")
+	return nil
+}
+
+// generateSingleBucketConfig 生成单桶配置
+func (a *App) generateSingleBucketConfig(endpoint, accessKey, secretKey string, workers int, incremental, verbose bool) string {
+	return fmt.Sprintf(`# ObjectSync - 对象存储下载工具配置文件（单桶模式）
+# 由交互式初始化生成
+
+# 对象存储连接配置
+ceph:
+  endpoint: "%s"
+  access_key: "%s"
+  secret_key: "%s"
+  bucket: "your-bucket-name"              # 请修改为实际的桶名称
+
+# 备份配置
+backup:
+  output_dir: "./backup"                  # 请修改为实际的输出目录
+  incremental: %t
+  state_file: ".backup_state.json"
+  workers: %d
+  verbose: %t
+
+# 重试配置
+retry:
+  max_attempts: 3
+  delay: "5s"
+`, endpoint, accessKey, secretKey, incremental, workers, verbose)
+}
+
+// generateMultiBucketConfig 生成多桶配置
+func (a *App) generateMultiBucketConfig(endpoint, accessKey, secretKey string, workers int, incremental, verbose bool) string {
+	return fmt.Sprintf(`# ObjectSync - 对象存储下载工具配置文件（多桶模式）
+# 由交互式初始化生成
+
+# 对象存储连接配置
+ceph:
+  endpoint: "%s"
+  access_key: "%s"
+  secret_key: "%s"
+
+# 多桶配置 - 请根据实际情况修改桶名称和输出目录
+buckets:
+  - name: "documents"                     # 修改为实际的桶名称
+    output_dir: "./backup/documents"      # 修改为实际的输出目录
+    state_file: ".state_documents.json"
+  - name: "photos"
+    output_dir: "./backup/photos"
+    state_file: ".state_photos.json"
+  - name: "videos"
+    output_dir: "./backup/videos"
+    state_file: ".state_videos.json"
+    workers: 8                            # 可选：为特定桶设置不同的并发数
+    verbose: true                         # 可选：为特定桶启用详细输出
+
+# 全局备份配置
+backup:
+  incremental: %t                         # 启用增量备份
+  workers: %d                             # 默认并发数
+  verbose: %t                             # 默认详细输出
+
+# 重试配置
+retry:
+  max_attempts: 3
+  delay: "5s"
+`, endpoint, accessKey, secretKey, incremental, workers, verbose)
+}
+
+func (a *App) runMenu(cmd *cobra.Command, args []string) error {
+	for {
+		// 清屏（跨平台兼容）
+		a.clearScreen()
+
+		// 显示标题
+		fmt.Println("========================================")
+		fmt.Println("       ObjectSync - 交互式菜单")
+		fmt.Println("========================================")
+		fmt.Println()
+		fmt.Println("欢迎使用 ObjectSync 对象存储下载工具！")
+		fmt.Println()
+
+		// 显示菜单
+		fmt.Println("========================================")
+		fmt.Println("            主菜单")
+		fmt.Println("========================================")
+		fmt.Println()
+		fmt.Println("[1] 初始化配置")
+		fmt.Println("[2] 开始下载")
+		fmt.Println("[3] 查看状态")
+		fmt.Println("[4] 查看配置")
+		fmt.Println("[5] 查看帮助")
+		fmt.Println("[0] 退出")
+		fmt.Println()
+		fmt.Print("请选择操作 (0-5): ")
+
+		var choice string
+		fmt.Scanln(&choice)
+		fmt.Println()
+
+		switch choice {
+		case "1":
+			// 初始化配置
+			fmt.Println("[信息] 启动配置向导...")
+			if err := a.runInitMenu(); err != nil {
+				fmt.Printf("配置初始化失败: %v\n", err)
+			}
+			a.pauseAndContinue()
+
+		case "2":
+			// 开始下载
+			fmt.Println("[信息] 开始下载...")
+			if err := a.runBackup(cmd, args); err != nil {
+				fmt.Printf("下载失败: %v\n", err)
+			}
+			a.pauseAndContinue()
+
+		case "3":
+			// 查看状态
+			fmt.Println("[信息] 查看备份状态...")
+			if err := a.runStatus(cmd, args); err != nil {
+				fmt.Printf("查看状态失败: %v\n", err)
+			}
+			a.pauseAndContinue()
+
+		case "4":
+			// 查看配置
+			fmt.Println("[信息] 当前配置文件内容:")
+			fmt.Println("========================================")
+			a.showCurrentConfig()
+			fmt.Println("========================================")
+			a.pauseAndContinue()
+
+		case "5":
+			// 查看帮助
+			fmt.Println("[信息] 显示帮助信息...")
+			a.rootCmd.Help()
+			a.pauseAndContinue()
+
+		case "0":
+			fmt.Println()
+			fmt.Println("[信息] 感谢使用 ObjectSync 工具！")
+			fmt.Println()
+			return nil
+
+		default:
+			fmt.Println("[错误] 无效的选择，请重新输入")
+			time.Sleep(1 * time.Second)
+		}
+	}
+}
+
+// pauseAndContinue 暂停并等待用户按键继续
+func (a *App) pauseAndContinue() {
+	fmt.Println()
+	fmt.Print("[信息] 按回车键返回主菜单...")
+	fmt.Scanln()
+}
+
+// clearScreen 跨平台清屏
+func (a *App) clearScreen() {
+	if runtime.GOOS == "windows" {
+		cmd := exec.Command("cmd", "/c", "cls")
+		cmd.Stdout = os.Stdout
+		cmd.Run()
+	} else {
+		fmt.Print("\033[2J\033[H")
+	}
+}
+
+// showCurrentConfig 显示当前配置文件
+func (a *App) showCurrentConfig() {
+	configFile := "config.yaml"
+	if data, err := os.ReadFile(configFile); err != nil {
+		fmt.Println("[警告] 配置文件不存在或无法读取，请先进行配置")
+	} else {
+		fmt.Print(string(data))
+	}
 }

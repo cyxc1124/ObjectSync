@@ -82,7 +82,7 @@ jobs:
         echo "BINARY_NAME=$BINARY_NAME" >> $GITHUB_ENV
 
     - name: 上传构建产物
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: ${{ env.BINARY_NAME }}
         path: ${{ env.BINARY_NAME }}
@@ -105,7 +105,7 @@ jobs:
         echo "tag=$TAG" >> $GITHUB_OUTPUT
 
     - name: 下载所有构建产物
-      uses: actions/download-artifact@v3
+      uses: actions/download-artifact@v4
       with:
         path: artifacts
 

@@ -21,7 +21,6 @@ type App struct {
 	version   string
 	buildTime string
 	gitCommit string
-	config    *config.ConfigManager
 }
 
 func NewApp() *App {
